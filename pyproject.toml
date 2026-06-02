@@ -3,18 +3,21 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ako4x"
-version = "0.1.0"
-description = "Scaffolding for GPU kernel optimization environments"
+name = "ako4x-rocm"
+version = "0.1.0.dev0"
+description = "AKO4X for AMD ROCm — agentic kernel optimization on MI300X / MI325X / MI350X / MI355X (gfx942 / gfx950), beating stock HIP, AITER, and FlyDSL."
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
-    {name = "Shuxiao Xie"},
-    {name = "Shuyang Xie"},
+    {name = "Andy Luo"},
 ]
+# Upstream authors of AKO4X (NVIDIA branch) credited in README.md and CITATION.
 requires-python = ">=3.10"
 dependencies = [
-    # Cross-platform: needed by spawn.py / scripts orchestration on any host.
+    # --- Cross-platform (needed on the orchestrator host for spawn.py / scripts) -----------
+    # flashinfer-bench is retained: its TraceSet / Definition / Workload / Solution pydantic
+    # models and dataset format are used unchanged; only the *execution engine* is replaced
+    # by a ROCm-aware path inside scripts/benchmark_adapter.py.
     "flashinfer-bench @ git+https://github.com/flashinfer-ai/flashinfer-bench.git@main",
     "numpy>=1.24.0",
     "apache-tvm-ffi>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2",
@@ -24,41 +27,48 @@ dependencies = [
     "tabulate",
     "tqdm",
     "click",
-    # TOML parsing on Python 3.10: tomllib is stdlib only on 3.11+, so spawn.py
-    # and the scripts import-guard fall back to `import tomli`. Declare it so a
-    # clean 3.10 install actually has it. (Modal runs 3.12, so this is host-only.)
+    # tomllib is stdlib on 3.11+; tomli is the 3.10 fallback. The orchestrator runs on
+    # the user's host (often macOS), so keep host-side TOML parsing unconditional.
     "tomli; python_version < '3.11'",
-    # torch has macOS arm64 wheels; keep unconditional so orchestration imports work.
+    # torch has macOS arm64 wheels; keep unconditional so spawn.py imports work everywhere.
     "torch>=2.9.1",
-    # Linux + NVIDIA only. Needed by the local backend; the Modal backend installs
-    # these inside its container image. Gating by sys_platform keeps Linux installs
-    # identical while letting macOS hosts (Modal-only driving) install at all.
+
+    # --- Linux + ROCm only (the local backend) ---------------------------------------------
+    # AITER — AMD's optimized kernel library. The closest "stock expert" analogue to
+    # FlashInfer-python on NVIDIA; ako4x-rocm uses it both as a baseline-to-beat AND as a
+    # source of pre-tuned reference kernels for the agent to study.
+    "aiter @ git+https://github.com/ROCm/aiter.git@main ; sys_platform == 'linux'",
+    # Triton wheels are cross-platform; the ROCm backend is bundled when installed on a
+    # ROCm host. Pin the same minimum as AKO4X-NV for portability of kernels written in
+    # both branches.
     "triton>=3.5.0; sys_platform == 'linux'",
-    "cupti-python>=13.0.0; sys_platform == 'linux'",
-    "flashinfer-python @ git+https://github.com/flashinfer-ai/flashinfer.git@main ; sys_platform == 'linux'",
-    "torch-c-dlpack-ext; sys_platform == 'linux'",
-    "cuda-python; sys_platform == 'linux'",
-    "nvidia-cudnn-frontend>=1.13.0; sys_platform == 'linux'",
-    "nvidia-ml-py; sys_platform == 'linux'",
+    # rocm-smi-lib provides Python bindings to rocm-smi for GPU detection + telemetry —
+    # the analogue of nvidia-ml-py.
+    "rocm-smi-lib; sys_platform == 'linux'",
+    # CuPy is optional but useful as a reference Python-side ROCm tensor library when the
+    # agent wants to prototype outside torch. Comment out to skip; not strictly required.
+    # "cupy-rocm-6-3; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
+# Modal does not provide ROCm GPUs as of 2026-05. The ako4x-rocm port uses SLURM / direct
+# SSH runners for remote execution (see scripts/run_slurm.py, scripts/run_tensorwave_ssh.py)
+# instead of the Modal backend. Kept as an extra in case Modal gains ROCm support; install
+# would not enable a runnable backend today.
 modal = ["modal>=1.3.0"]
-tilelang = ["tilelang", "cuda-tile"]
-cutlass-dsl = ["nvidia-cutlass-dsl>=4.3.4"]
-# deep-gemm is used by the DSA-indexer expert baseline
-# (flashinfer_deepgemm_wrapper_2ba145). Not required by any AKO4X-optimized
-# kernel — install this extra only if you want to run the expert baseline
-# locally (e.g. to re-measure after an env change).
-#
-# IMPORTANT: pip must use `--no-build-isolation` because deep-gemm's build
-# links against the current env's torch, which pip's default isolated build
-# env doesn't see. Install with:
-#
-#   pip install --no-build-isolation ".[deep-gemm]"
-#
-# (or pre-install torch + ninja in the isolated env by other means.)
-deep-gemm = ["deep_gemm @ git+https://github.com/deepseek-ai/DeepGEMM.git@main ; sys_platform == 'linux'"]
+
+# TileLang has a ROCm backend (install via ROCm wheels or build from source with
+# install_rocm.sh). Same name as upstream so the optional-deps surface stays compatible.
+tilelang = ["tilelang"]
+
+# FlyDSL is the AMD-internal kernel DSL we target as one of the three baselines.
+# Source: github.com/ROCm/FlyDSL (private — contact AMD for access). Listed for
+# documentation; manual install required.
+# flydsl = ["flydsl @ git+ssh://git@github.com/ROCm/FlyDSL.git@main ; sys_platform == 'linux'"]
+
+# Composable Kernel (CK) — AMD's CUTLASS-equivalent template library.
+# Header-only; install via the rocm-composable-kernel package or build from source.
+# ck = ["composable-kernel ; sys_platform == 'linux'"]
 
 [tool.hatch.metadata]
 allow-direct-references = true

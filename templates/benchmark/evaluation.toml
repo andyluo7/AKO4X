@@ -1,22 +1,56 @@
-# Benchmark defaults + per-op_type overrides for flashinfer-bench.
-# [default] values apply to all operators; per-op_type sections (keyed by op_type,
-# e.g. [moe], [attention], [gemm] — match the dataset's definitions/<op_type>/
-# directory names) override specific fields. To target a single operator, use the
-# op_type its definition lives under; there is no per-operator-name section.
-# These values are merged into the child's config.toml [benchmark] at spawn time.
-# File location is the benchmark-binding marker. The repo assumes a single active
-# benchmark (see CLAUDE.md): switching benchmarks is fork-level — rename this dir
-# and the matching templates/skills/<name>/, not "add a sibling".
+# Benchmark defaults + per-op_type overrides — ako4x-rocm fork.
+#
+# ROCm-specific tolerances and run defaults override the upstream NV values where
+# AMD numerics or kernel timing variance differs materially:
+#   * `warmup_runs = 5` (vs upstream 3): hipcc JIT + AITER first-launch caches are
+#     warmer-sensitive than CUDA — more warmup smooths the steady-state estimate.
+#   * `timeout_seconds = 600` (vs 300): some AMD-side kernel JITs take longer
+#     (AITER's first call) — protect against false-positive timeouts.
+#   * MoE FP8 tolerances loosened to `atol=1.5`: the gfx950 MFMA path uses
+#     slightly different rounding than B200's; FlashInfer numerics tests are
+#     calibrated for NV; on AMD we relax once and pin it as the new floor.
+#
+# [default] values apply to all operators; per-op_type sections override specific
+# fields. These values are merged into the child's config.toml [benchmark] at
+# spawn time. File location is the benchmark-binding marker — keep this file at
+# this path.
 
 [default]
 baseline_iterations = 5
 solution_iterations = 100
 num_trials = 5
-warmup_runs = 3
-timeout_seconds = 300
+warmup_runs = 5          # ROCm: hipcc JIT cache, +2 over NV upstream
+timeout_seconds = 600    # ROCm: AITER first-launch JIT can be slow, +300 over NV
 use_isolated_runner = true
 
+# ROCm-specific: capture rocprofv3 counters during eval when requested by the
+# agent (off by default — adds 2-5x overhead). When on, results dict gains a
+# "rocprof_counters" field per workload.
+enable_rocprof = false
+
+# ROCm-specific: which GPU arch the *agent* should target by default. The runner
+# auto-detects the host arch; this override is for cross-compile scenarios
+# (e.g. you're on a gfx942 dev box but want to build gfx950-targeted kernels).
+target_gpu_arch = "auto"   # "auto" | "gfx942" | "gfx950" | "gfx942,gfx950"
+
 [moe]
-atol = 1.0
+atol = 1.5               # ROCm: relaxed from upstream 1.0 (MFMA rounding delta)
 rtol = 0.3
 required_matched_ratio = 0.9
+
+[mla]
+# Tighter than MoE since MLA is reduction-heavy and AITER's MLA is well-tested.
+atol = 0.8
+rtol = 0.05
+required_matched_ratio = 0.95
+
+[attention]
+atol = 0.5
+rtol = 0.02
+required_matched_ratio = 0.99
+
+[norm]
+# RMSNorm / LayerNorm: tight tolerances, the math is well-defined.
+atol = 0.1
+rtol = 0.005
+required_matched_ratio = 1.0

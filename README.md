@@ -1,4 +1,17 @@
-<h1 align="center">AKO4X</h1>
+<h1 align="center">AKO4X-ROCm <sub>(fork)</sub></h1>
+<p align="center"><b>Agentic Kernel Optimization for AMD Instinct GPUs</b></p>
+
+<blockquote>
+<b>This is the ROCm port of <a href="https://github.com/TongmingLAIC/AKO4X">TongmingLAIC/AKO4X</a></b> — targeting AMD MI300X / MI325X (gfx942) and MI350X / MI355X (gfx950).
+Goal: drive an agent (Claude Code) to produce <b>HIP / AITER / FlyDSL</b> kernels that beat their stock implementations on AMD Instinct hardware, mirroring what upstream AKO4X does against FlashInfer-expert on NVIDIA B200.
+Status: <b>Phase 0 (skeleton)</b> — see <a href="https://github.com/andyluo7/AKO4X/blob/rocm-port/docs/rocm-porting-plan.md">docs/rocm-porting-plan.md</a> for the phased roadmap. Upstream NV branch is unmodified and credited throughout.
+</blockquote>
+
+<p align="center"><b>Upstream README follows — items marked <sup>(NV)</sup> reference the original NVIDIA-targeted branch and may not apply to ROCm.</b></p>
+
+<hr/>
+
+<h1 align="center">AKO4X <sup>(NV)</sup></h1>
 <p align="center"><b>Agentic Kernel Optimization — advanced & eXtensible</b></p>
 
 <p align="center">

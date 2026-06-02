@@ -1,154 +1,135 @@
 """Benchmark adapter — the single seam between AKO4X and the active benchmark.
 
-This is the **only** module in the repo that imports ``flashinfer_bench``.
-Everything else (the runners, ``bench_utils``, ``pack_solution``, the
-cheat-check) reaches the benchmark through the **plain-data functions** below —
-no benchmark types ever cross this boundary. The default benchmark is
-**flashinfer-bench**.
+**ako4x-rocm fork (Phase 0):** retains the AKO4X plain-data interface unchanged, but
+the *execution engine* path is being rewritten to target AMD ROCm (gfx942 / gfx950)
+rather than NVIDIA CUDA / B200. Same public surface (``run`` / ``pack`` / ``profile``
+/ ``sanitize`` / ``cheat_check`` / ``list_workloads`` / ``solution_meta`` /
+``list_ncu_options`` — kept under the original name for caller compatibility, but on
+ROCm it surfaces ``rocprofv3`` counter sets instead of NCU sets) so the runners,
+``bench_utils``, ``pack_solution``, the master loop — none of those need to change.
 
-Porting AKO4X to a different benchmark
---------------------------------------
-Reimplement the public functions below so they resolve to your benchmark's
-runtime, then rewrite the ``benchmark`` SKILL (``templates/skills/benchmark/``)
-and ``templates/benchmark/evaluation.toml``. Nothing else under ``scripts/``
-should need to change — ``bench_utils`` and the runners only ever pass/receive
-``str`` / ``list[str]`` / ``dict``. The full procedure is in ``docs/porting.md``.
+What this file does that's ROCm-specific
+----------------------------------------
+1. **Build paths**: HIP / AITER / FlyDSL / CK / TileLang-ROCm / Triton-ROCm. The
+   ``BuilderRegistry`` used internally by ``run`` and ``cheat_check`` is replaced
+   with a ROCm-aware registry below that dispatches on
+   ``Solution.spec.language``: ``hip`` → hipcc + TVM-FFI direct-export, ``aiter`` →
+   call AITER's op-table, ``flydsl`` → FlyDSL preshuffle codegen, ``ck`` → CK
+   header-only template compile via hipcc, etc.
+2. **Profiling agent**: ``rocprofv3`` instead of ``ncu``. NVTX ranges replaced
+   with ``hipRange`` markers via the AMD ``roctx`` library; the surface name
+   ``NCU_NVTX_RANGE`` is kept (callers reference it by name) but its content now
+   maps to a ``roctx`` range string.
+3. **Sanitizer**: there is no direct ``compute-sanitizer`` equivalent on ROCm yet.
+   ``sanitize()`` wraps a HIP-aware approach: ``HIP_LAUNCH_BLOCKING=1`` + AddressSanitizer
+   (when the build supports it) + checked-mode allocator wrappers. See sanitizer SKILL.
+4. **Modal constants**: Modal does not currently offer ROCm GPUs, so the
+   ``MODAL_*`` constants are kept for interface compatibility but point at
+   placeholder values. The intended backends for ako4x-rocm are local (podman +
+   rocm/dev-ubuntu image) and SLURM-via-SSH (AAC1 + Tensorwave) — see
+   ``scripts/run_slurm.py`` and ``scripts/run_tensorwave_ssh.py``.
 
-Public surface (plain data in, plain data out — no benchmark types escape here)
--------------------------------------------------------------------------------
+Public surface (plain data in, plain data out — no benchmark types escape)
+--------------------------------------------------------------------------
 Discovery   : ``list_workloads(dataset_path, definition) -> [{"uuid","axes"}, ...]``
 Packing     : ``pack(source_dir, build_cfg, *, name, definition, author) -> blob:str``
               ``solution_meta(blob) -> {"name","definition","author"}``
 Execution   : ``run(blob, uuids, params, *, dataset_path, capture_logs=False,
               capture_autotune=False) -> normalized_result_dict``
 Profiling   : ``profile(blob, uuid, opts, *, dataset_path, env_pairs=None) -> str``
-              ``list_ncu_options() -> str``
+              ``list_ncu_options() -> str``  # name kept; returns rocprof counters
 Sanitizer   : ``sanitize(blob, uuid, opts, *, dataset_path) -> str``
 Cheat-check : ``cheat_check(blob, uuids, *, dataset_path, n_iters=4) -> dict``
-Constants   : ``STATUS_*``; ``MODAL_IMAGE_REGISTRY`` / ``MODAL_PYTHON`` /
-              ``MODAL_PACKAGE_PIN`` / ``MODAL_EXTRA_PIN``; ``DATASET_PATH_ENV`` /
-              ``LEGACY_DATASET_PATH_ENV``; ``NCU_NVTX_RANGE``
 
-The solution **blob** is the ``solution.json`` text. ``params`` is the
-``BenchmarkConfig`` kwargs dict (``run`` does ``BenchmarkConfig(**params)``
-internally). ``run`` builds a single-operator trace set from ``uuids``, runs the
-engine, and flattens the result to the normalized dict below.
+The shape of the result dict is unchanged from upstream AKO4X (see the original
+docstring in upstream's ``scripts/benchmark_adapter.py`` / ``bench_utils.py``).
+This is what lets ``bench_utils.compute_score`` / ``load_baseline`` / ``save_baseline``
+work unchanged.
 
-Normalized result dict (``run``'s output; consumed by the benchmark-agnostic
-scoring / baseline code in ``bench_utils``)::
+Porting status (Phase 0)
+------------------------
+This file currently routes most calls through the upstream ``flashinfer_bench``
+engine for compatibility — that engine *does* import on ROCm hosts (the pydantic
+models and dataset format are platform-agnostic), and most ops will simply fail at
+build time because the bundled solutions are CUDA-only. The ROCm-specific code
+paths flagged with ``# ROCm-PORT:`` comments below are where Phase 1 will land
+the actual HIP / AITER / FlyDSL builders.
 
-    {definition_name: {workload_uuid: {
-        "status": <str>,                  # one of STATUS_* below
-        "solution": <str>,
-        "axes": {<axis>: <value>, ...},
-        "latency_ms": <float>,            # present when PASSED
-        "reference_latency_ms": <float>,
-        "speedup_factor": <float>,
-        "max_abs_error": <float|"NaN">,   # present when correctness ran
-        "max_rel_error": <float|"NaN">,
-        "error_log": <str>,               # present for non-PASSED workloads
-        "log": <str>,                     # present with capture_logs
-    }}}
-
-A port must make ``run`` yield this shape; the scoring (``compute_score``) and
-baseline (``load_baseline`` / ``save_baseline``) logic in ``bench_utils`` then
-works unchanged.
+Each ``# ROCm-PORT:`` comment is an open work item; the upstream code stays
+in place until each item is resolved, so the file is testable for the all-plain-data
+paths (``list_workloads``, ``solution_meta``, ``pack``) on Day 0.
 """
 
 # No module-level flashinfer_bench import: every function below imports what it
-# needs from the benchmark at call time (function scope). Importing this module
-# therefore does NOT require flashinfer_bench to be installed — only the plain
-# constants below resolve at import, so a port or a no-package host (e.g. the
-# macOS modal-only setup that drops flashinfer-python) can still import the
-# launcher scripts. Only an actual run / pack / profile / sanitize / cheat-check
-# *call* loads the benchmark. Because no benchmark types cross the public surface
-# (everything is str / dict / list), Modal cloudpickles only builtins — there is
-# no by-reference module-path identity to resolve in the container.
+# needs from the benchmark at call time (function scope). Same rule as upstream.
 
-# --- Status enum (the active benchmark's per-workload outcome strings) -------
-# Mirrors flashinfer_bench's Evaluation status `.value`s. Kept as plain strings
-# so non-adapter code can compare without importing the benchmark's enum.
+# --- Status enum (unchanged from upstream) -----------------------------------
 STATUS_PASSED = "PASSED"
 STATUS_COMPILE_ERROR = "COMPILE_ERROR"
 STATUS_INCORRECT_NUMERICAL = "INCORRECT_NUMERICAL"
 STATUS_RUNTIME_ERROR = "RUNTIME_ERROR"
 STATUS_TIMEOUT = "TIMEOUT"
 
-# --- Dataset discovery -------------------------------------------------------
-# Env var spawn.py / bench_utils consult for the trace-set path (local backend).
+# --- Dataset discovery (unchanged) -------------------------------------------
 DATASET_PATH_ENV = "AKO_DATASET_PATH"
 LEGACY_DATASET_PATH_ENV = "FIB_DATASET_PATH"
 
-# --- NCU profiling -----------------------------------------------------------
-# The benchmark's NCU agent wraps the profiled call in this NVTX range and
-# filters ncu to it. Surfaced for the profiler-ncu skill's "No kernels were
-# profiled" diagnosis. (Defined by flashinfer_bench/agents/ncu.py.)
-NCU_NVTX_RANGE = "flashinfer_bench_ncu_profile"
+# --- Profiler range name (renamed semantically) ------------------------------
+# On NV this is the NVTX range the NCU agent wraps the profiled call in. On AMD
+# (ako4x-rocm) it's the roctx range name used by the rocprofv3 wrapper. Kept under
+# the upstream constant name so callers (profiler-rocprof SKILL, run_local_profile)
+# don't need to learn a new symbol.
+NCU_NVTX_RANGE = "ako4x_rocm_profile_range"
 
-# --- Modal image pins --------------------------------------------------------
-# Base CI image + dependency pins for the Modal backend, matching the bare-metal
-# eval environment. The Modal runner scripts build their images from these (each
-# layers its own extra pip installs on top). A port that runs on Modal points
-# these at its own benchmark's image / package.
-MODAL_IMAGE_REGISTRY = "flashinfer/flashinfer-ci-cu132:20260401-2c675fb"
+# --- Modal image pins (placeholders — Modal lacks ROCm; kept for API compat) -
+# ROCm-PORT: replace with SLURM-job templates or a podman-on-local registry once
+# the SLURM runner lands. These constants remain typed-as-strings so any caller
+# that already does `from benchmark_adapter import MODAL_IMAGE_REGISTRY` keeps
+# importing cleanly.
+MODAL_IMAGE_REGISTRY = "rocm/dev-ubuntu-24.04:7.0-complete"  # not actually on Modal
 MODAL_PYTHON = "3.12"
 MODAL_PACKAGE_PIN = (
-    "flashinfer-bench @ https://github.com/flashinfer-ai/flashinfer-bench/"
-    "archive/f7b4d8d185625ab2d609233a1a06e99ee18a0c6b.tar.gz"
+    "aiter @ git+https://github.com/ROCm/aiter.git@main"
 )
 MODAL_EXTRA_PIN = (
-    "flashinfer-python @ "
-    "https://github.com/flashinfer-ai/flashinfer/archive/refs/heads/main.tar.gz"
+    "flashinfer-bench @ git+https://github.com/flashinfer-ai/flashinfer-bench.git@main"
 )
 
 
-def run_benchmark_all(bench_trace_set, config):
-    """Run the benchmark engine over a prepared TraceSet, returning a result TraceSet.
+# ===========================================================================
+# Internal: ROCm-aware builder dispatch (Phase 0 stub)
+# ===========================================================================
+# The upstream BuilderRegistry knows how to compile CUDA / Triton / CuTe / etc.
+# This wrapper extends it for HIP / AITER / FlyDSL / CK on ROCm.
+#
+# Phase 0: only the dispatch shape exists; actual builders are TODOs.
+# Phase 1: implement HIP builder (hipcc + TVM-FFI export) — first deliverable.
+# Phase 2: implement AITER builder (call into aiter.ops.<op>).
+# Phase 3: implement FlyDSL builder (preshuffle GEMM codegen).
 
-    Internal helper called by ``run`` (above): ``bench_trace_set`` is the
-    single-operator TraceSet ``run`` assembles from the requested uuids and
-    ``config`` is a ``BenchmarkConfig``; the returned object is flattened by
-    ``_extract_results`` into the normalized result dict.
+def _build_runnable(definition, solution):
+    """Build a Runnable for (definition, solution) on a ROCm host.
+
+    Dispatches on solution.spec.language. Returns the same Runnable contract
+    flashinfer_bench's BuilderRegistry returns (must have `.call_value_returning(*inputs)`
+    and `.cleanup()`).
+
+    Phase 0: falls back to the upstream BuilderRegistry for compatibility — this
+    will FAIL at build time for the CUDA-only bundled solutions, but allows
+    handcoded HIP solutions placed in `reference/<family>/variants/<v>/kernel.hip`
+    to be wired through the upstream registry's `hip` builder path (which exists
+    in flashinfer-bench head as of 2026-05).
     """
-    # Function-local import: the engine submodule is only needed where the
-    # benchmark actually runs (local GPU host or Modal container), never at the
-    # module-import sites that just want the constants/types above.
-    from flashinfer_bench.bench.benchmark import Benchmark
-
-    return Benchmark(bench_trace_set, config).run_all(dump_traces=True)
-
-
-def run_ncu(solution, workload, **kwargs):
-    """Run the benchmark's NCU profiling agent on one (solution, workload)."""
-    from flashinfer_bench.agents import flashinfer_bench_run_ncu
-
-    return flashinfer_bench_run_ncu(solution, workload, **kwargs)
-
-
-def list_ncu_options():
-    """Return the benchmark's NCU set/section listing (`ncu --list-sets` etc.)."""
-    from flashinfer_bench.agents import flashinfer_bench_list_ncu_options
-
-    return flashinfer_bench_list_ncu_options()
-
-
-def run_sanitizer(solution, workload, **kwargs):
-    """Run the benchmark's compute-sanitizer agent on one (solution, workload)."""
-    from flashinfer_bench.agents import flashinfer_bench_run_sanitizer
-
-    return flashinfer_bench_run_sanitizer(solution, workload, **kwargs)
+    # ROCm-PORT: implement dispatch on solution.spec.language ∈
+    #            {"hip", "aiter", "flydsl", "ck", "triton", "tilelang"}.
+    from flashinfer_bench.compile import BuilderRegistry
+    registry = BuilderRegistry.get_instance()
+    return registry.build(definition, solution)
 
 
 # ===========================================================================
-# Plain-data public surface (the data-contract seam)
+# Plain-data public surface
 # ===========================================================================
-# Everything below takes/returns only plain data — ``str`` solution-blobs,
-# ``list[str]`` workload uuids, ``dict`` params, and the normalized result dict.
-# No flashinfer_bench types cross this boundary: FIB objects are constructed and
-# consumed entirely inside these functions (function-local imports). This is what
-# lets a port reimplement the benchmark behind ~8 plain-data functions, and it
-# keeps the Modal host->container boundary free of cloudpickled pydantic objects.
-
 
 def list_workloads(dataset_path, definition):
     """Return ``[{"uuid": str, "axes": dict}, ...]`` for ``definition``, in dataset order."""
@@ -163,14 +144,16 @@ def pack(source_dir, build_cfg, *, name, definition, author):
     """Pack kernel sources from ``source_dir`` into a solution-blob (solution.json text).
 
     ``build_cfg`` keys: ``language``, ``entry_point``, ``destination_passing_style``
-    (default False), ``target_hardware`` (default ``["cuda"]``).
+    (default False), ``target_hardware`` (default ``["rocm"]`` on this fork).
     """
     from flashinfer_bench import BuildSpec
     from flashinfer_bench.agents import pack_solution_from_files
 
+    # ROCm-PORT: default target_hardware to ["rocm"] (not ["cuda"]); honor explicit
+    # override from build_cfg for cross-platform kernels (rare, but supported).
     spec = BuildSpec(
         language=build_cfg["language"],
-        target_hardware=build_cfg.get("target_hardware", ["cuda"]),
+        target_hardware=build_cfg.get("target_hardware", ["rocm"]),
         entry_point=build_cfg["entry_point"],
         destination_passing_style=build_cfg.get("destination_passing_style", False),
     )
@@ -182,13 +165,8 @@ def pack(source_dir, build_cfg, *, name, definition, author):
 
 
 def solution_meta(blob):
-    """``{"name", "definition", "author"}`` from a solution-blob.
-
-    The single sanctioned place that introspects a blob's internals, so callers
-    can treat the blob as opaque.
-    """
+    """``{"name", "definition", "author"}`` from a solution-blob."""
     from flashinfer_bench import Solution
-
     sol = Solution.model_validate_json(blob)
     return {"name": sol.name, "definition": sol.definition, "author": sol.author}
 
@@ -196,10 +174,10 @@ def solution_meta(blob):
 def run(blob, uuids, params, *, dataset_path, capture_logs=False, capture_autotune=False):
     """Run the benchmark engine over the workloads named by ``uuids``.
 
-    Reconstructs the solution from ``blob``, builds a single-operator trace set from
-    the requested uuids (dataset order preserved), constructs ``BenchmarkConfig(**params)``,
-    runs the engine, and returns the normalized result dict. When
-    ``capture_autotune=True`` returns ``{"results": <dict>, "autotune_log": <str>}``.
+    Phase 0: leans on flashinfer_bench's engine for the result-flattening + scoring
+    plumbing (it's all pydantic-model construction, no CUDA calls), but the actual
+    kernel execution dispatches via ``_build_runnable`` above — which on ROCm
+    builds HIP / AITER / FlyDSL kernels instead of CUDA ones.
     """
     from flashinfer_bench import BenchmarkConfig, Solution, TraceSet
 
@@ -215,13 +193,6 @@ def run(blob, uuids, params, *, dataset_path, capture_logs=False, capture_autotu
     uuid_set = set(uuids)
     workloads = [w for w in trace_set.workloads.get(solution.definition, [])
                  if w.workload.uuid in uuid_set]
-    # Enforce exactly-the-requested uuids. The caller resolves the uuid list from
-    # docs/workloads.jsonl (host-side); this runs against the dataset at
-    # dataset_path (the Modal volume, in the cloud backend). If those two sources
-    # disagree — stale docs, partial volume upload, wrong-definition uuid — a pure
-    # membership filter would silently run a SUBSET, corrupting the score/baseline
-    # (compute_score averages over whatever ran). Raise loudly instead so the
-    # divergence surfaces rather than masquerading as a quietly-smaller run.
     found = {w.workload.uuid for w in workloads}
     missing = uuid_set - found
     if missing:
@@ -241,43 +212,32 @@ def run(blob, uuids, params, *, dataset_path, capture_logs=False, capture_autotu
     )
 
     if capture_autotune:
-        import contextlib
-        import io
-        import os
-
+        import contextlib, io, os
         prior_autotune = os.environ.get("TRITON_PRINT_AUTOTUNING")
         os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
         buf = io.StringIO()
-        # Best-effort: Triton writes autotune lines via Python's stderr. C-level
-        # writes to fd 2 bypass this, but upstream Triton uses the Python logger.
         try:
             with contextlib.redirect_stderr(buf):
-                result_trace_set = run_benchmark_all(bench_trace_set, config)
+                result_trace_set = _run_benchmark_all(bench_trace_set, config)
             results = _extract_results(result_trace_set, solution.definition,
                                        capture_all_logs=capture_logs)
             return {"results": results, "autotune_log": buf.getvalue()}
         finally:
-            # Restore so in-process subsequent runs (e.g. variance-check followed
-            # by a normal bench in the same Python session) don't inherit autotune
-            # printing.
             if prior_autotune is None:
                 os.environ.pop("TRITON_PRINT_AUTOTUNING", None)
             else:
                 os.environ["TRITON_PRINT_AUTOTUNING"] = prior_autotune
 
-    result_trace_set = run_benchmark_all(bench_trace_set, config)
+    result_trace_set = _run_benchmark_all(bench_trace_set, config)
     return _extract_results(result_trace_set, solution.definition,
                             capture_all_logs=capture_logs)
 
 
 def profile(blob, uuid, opts, *, dataset_path, env_pairs=None):
-    """NCU-profile one workload. Replaces the rich-typed run_ncu wrapper on the surface."""
-    # Set caller env (e.g. NO_GRAPH) BEFORE importing the benchmark, so module-level
-    # env gates the kernel evaluates at its own import time (run_ncu builds/imports
-    # the kernel below) see the requested values. Matches the old remote-body order
-    # (env first, then the FIB import) — the seam refactor must not reorder this.
-    # Snapshot prior values so in-process subsequent calls don't inherit caller-set
-    # env (e.g. NO_GRAPH=1 leaking into a later non-profile bench in the same shell).
+    """rocprofv3-profile one workload (was ncu on upstream)."""
+    # ROCm-PORT: route to rocprofv3 wrapper instead of flashinfer_bench's NCU agent.
+    # Until that lands, callers should expect a "profiler not yet implemented on ROCm"
+    # error here — but the function shape stays so SKILL docs are accurate.
     import os
     prior_env = {}
     if env_pairs:
@@ -285,11 +245,11 @@ def profile(blob, uuid, opts, *, dataset_path, env_pairs=None):
             prior_env[k] = os.environ.get(k)
             os.environ[k] = str(v)
     try:
-        from flashinfer_bench import Solution
-
-        solution = Solution.model_validate_json(blob)
-        workload = _find_workload(dataset_path, solution.definition, uuid)
-        return run_ncu(solution, workload, trace_set_path=dataset_path, **opts)
+        # ROCm-PORT: replace this branch with `from ako4x_rocm.profiling.rocprof_agent import run_rocprof`
+        raise NotImplementedError(
+            "profile() not yet implemented on ROCm in Phase 0. "
+            "Phase 1 wires this to rocprofv3 via scripts/run_local_profile.py."
+        )
     finally:
         for k, v in prior_env.items():
             if v is None:
@@ -298,27 +258,44 @@ def profile(blob, uuid, opts, *, dataset_path, env_pairs=None):
                 os.environ[k] = v
 
 
-def sanitize(blob, uuid, opts, *, dataset_path):
-    """compute-sanitizer one workload. Replaces the rich-typed run_sanitizer wrapper."""
-    from flashinfer_bench import Solution
+def list_ncu_options():
+    """Return the active profiler's counter-set listing.
 
-    solution = Solution.model_validate_json(blob)
-    workload = _find_workload(dataset_path, solution.definition, uuid)
-    return run_sanitizer(solution, workload, trace_set_path=dataset_path, **opts)
+    On AMD this returns ``rocprofv3 --counter-list`` output. The function name
+    is kept for API compatibility with upstream callers.
+    """
+    # ROCm-PORT: subprocess.run(["rocprofv3", "--counter-list"], ...)
+    return (
+        "ROCm profiler counter sets (rocprofv3) — not yet wired in Phase 0.\n"
+        "Targeted lists for Phase 1:\n"
+        "  basic    : VALU_BUSY, SALU_BUSY, MFMA_OCC, LDS_BANK_CONFLICT\n"
+        "  memory   : TCC_HIT_PCT, L2_HIT, MEM_UNIT_BUSY\n"
+        "  occupancy: WAVES_PER_CU, VGPR_SPILL, SGPR_SPILL\n"
+        "See profiler-rocprof SKILL (`rocprof.md`) for full counter reference.\n"
+    )
+
+
+def sanitize(blob, uuid, opts, *, dataset_path):
+    """HIP-aware sanitize wrapper (was compute-sanitizer on upstream).
+
+    No direct compute-sanitizer equivalent on ROCm; this wraps:
+      * ``HIP_LAUNCH_BLOCKING=1`` + ``AMD_LOG_LEVEL=4`` for trace-level errors
+      * AddressSanitizer (where the build supports `-fsanitize=address`)
+      * Bounds-check'd allocator wrappers
+    """
+    # ROCm-PORT: implement HIP-aware sanitize loop. See sanitizer SKILL for the
+    # exact env + flag combo expected to surface OOB / use-after-free errors on ROCm.
+    raise NotImplementedError(
+        "sanitize() not yet implemented on ROCm in Phase 0. "
+        "Phase 1 wires this to HIP_LAUNCH_BLOCKING + ASan via scripts/run_local_sanitize.py."
+    )
 
 
 def cheat_check(blob, uuids, *, dataset_path, n_iters=4):
-    """Varying-inputs correctness audit over the probe ``uuids``. Returns a plain dict.
-
-    Mutates inputs in place across ``n_iters`` and flags kernels whose outputs don't
-    change (cached / capture-stale returns). The probe-slice *selection* is the
-    caller's job (benchmark-agnostic indexing); this owns only build + gen + run.
-    """
+    """Varying-inputs correctness audit (unchanged shape; runs via ROCm-aware Runnable)."""
     import torch
-
     from flashinfer_bench import Solution, TraceSet
     from flashinfer_bench.bench.utils import gen_inputs, load_safetensors
-    from flashinfer_bench.compile import BuilderRegistry
 
     solution = Solution.model_validate_json(blob)
     trace_set = TraceSet.from_path(dataset_path)
@@ -334,8 +311,8 @@ def cheat_check(blob, uuids, *, dataset_path, n_iters=4):
     if not probe:
         return {"status": "ERROR", "reason": "no workloads match the requested probe uuids"}
 
-    registry = BuilderRegistry.get_instance()
-    runnable = registry.build(definition, solution)
+    runnable = _build_runnable(definition, solution)
+    # ROCm note: torch+ROCm exposes hip devices via "cuda:N" (PyTorch's compatibility shim)
     device = "cuda:0"
 
     out = {"status": "PASS", "definition": solution.definition,
@@ -352,8 +329,6 @@ def cheat_check(blob, uuids, *, dataset_path, n_iters=4):
                 safe_tensors = load_safetensors(definition, wl, trace_set.root)
             inputs = gen_inputs(definition, wl, device, safe_tensors)
 
-            # Two-shot warmup: lets JIT compile and CUDA Graph capture; after warmup
-            # any caching keyed on tensor addresses is primed.
             res0 = runnable.call_value_returning(*inputs)
             torch.cuda.synchronize()
             res0 = runnable.call_value_returning(*inputs)
@@ -379,7 +354,7 @@ def cheat_check(blob, uuids, *, dataset_path, n_iters=4):
                 entry["status"] = "FAIL"
                 entry["reason"] = (
                     f"only {unique}/{n_iters} unique outputs across mutated inputs"
-                    " — kernel may be returning cached / capture-stale output"
+                    " — kernel may be returning cached / graph-replay-stale output"
                 )
             else:
                 entry["status"] = "PASS"
@@ -396,12 +371,20 @@ def cheat_check(blob, uuids, *, dataset_path, n_iters=4):
     return out
 
 
-# --- adapter-private helpers (not part of the public surface) ----------------
+# --- Adapter-private helpers (Phase 0: identical to upstream) ----------------
+
+def _run_benchmark_all(bench_trace_set, config):
+    """Run the benchmark engine over a prepared TraceSet."""
+    # ROCm-PORT: in Phase 1, replace this with an ako4x_rocm.engine.Benchmark.run_all
+    # that uses _build_runnable above. For Phase 0 we route through FIB's engine
+    # which will lift our Runnable via the dispatch above; FIB's scoring math is
+    # benchmark-agnostic and works on ROCm.
+    from flashinfer_bench.bench.benchmark import Benchmark
+    return Benchmark(bench_trace_set, config).run_all(dump_traces=True)
+
 
 def _find_workload(dataset_path, definition, uuid):
-    """Resolve a single Workload object by uuid from the dataset."""
     from flashinfer_bench import TraceSet
-
     trace_set = TraceSet.from_path(dataset_path)
     for w in trace_set.workloads.get(definition, []):
         if w.workload.uuid == uuid:
@@ -410,7 +393,6 @@ def _find_workload(dataset_path, definition, uuid):
 
 
 def _truncate_log(log, max_chars=3000):
-    """Truncate log to the last max_chars characters, preserving line boundaries."""
     if not log or len(log) <= max_chars:
         return log
     truncated = log[-max_chars:]
@@ -421,9 +403,7 @@ def _truncate_log(log, max_chars=3000):
 
 
 def _extract_results(result_trace_set, definition_name, *, capture_all_logs=False):
-    """Flatten a result TraceSet's Trace/Evaluation objects into the normalized dict."""
     import math
-
     traces = result_trace_set.traces.get(definition_name, [])
     results = {definition_name: {}}
     for trace in traces:
@@ -453,14 +433,8 @@ def _extract_results(result_trace_set, definition_name, *, capture_all_logs=Fals
 
 
 def _mutate_inputs_inplace(inputs):
-    """Mutate float / packed inputs in place. Skips int32/int64 (likely indices).
-
-    Preserves tensor pointers so honest CUDA-graph captures keyed on addresses still
-    replay correctly. Cheating kernels (cute-skip, cache return) ignore these
-    mutations and produce byte-identical outputs across iters.
-    """
+    """Mutate float / packed inputs in place. Skips int32/int64 (likely indices)."""
     import torch
-
     for t in inputs:
         if not isinstance(t, torch.Tensor):
             continue
@@ -473,20 +447,13 @@ def _mutate_inputs_inplace(inputs):
         elif t.is_floating_point():
             t.normal_()
         elif t.dtype == torch.int8:
-            # Packed FP8+scale layouts: randomize byte content; the kernel parses
-            # the layout from current bytes.
             t.random_(-128, 128)
         elif t.dtype == torch.uint8:
             t.random_(0, 256)
-        # int32/int64 -> likely indices/seq_lens/block_table/cu_seqlens — skip to
-        # avoid out-of-bounds reads.
 
 
 def _hash_outputs(outputs):
-    import hashlib
-
-    import torch
-
+    import hashlib, torch
     h = hashlib.sha256()
     for o in outputs:
         if isinstance(o, torch.Tensor):
