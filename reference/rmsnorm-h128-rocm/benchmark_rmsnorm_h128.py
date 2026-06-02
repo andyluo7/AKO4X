@@ -189,10 +189,6 @@ def main():
             w = torch.randn(hidden, dtype=dtype, device=device)
             row = {"n_rows": n_rows, "hidden": hidden, "latency_ms": {}}
             for name, fn in impls.items():
-                # hip_stock is hard-coded for HIDDEN=128 — skip for other sizes
-                if name == "hip_stock" and hidden != HIDDEN:
-                    row["latency_ms"][name] = None
-                    continue
                 try:
                     row["latency_ms"][name] = time_call(fn, (x, w, 1e-6), args.warmup, args.iters)
                 except Exception as e:
