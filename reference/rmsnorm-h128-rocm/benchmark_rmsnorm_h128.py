@@ -107,6 +107,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-rows", default="1,8,32,128,1024,8192",
                     help="comma-separated batch sizes")
+    ap.add_argument("--hidden", default="128,4096,7168",
+                    help="comma-separated hidden dims to sweep "
+                         "(128=MLA-head-dim, 4096=Llama-hidden, 7168=DSR1-hidden). "
+                         "NOTE: hip_stock kernel is hard-coded for HIDDEN=128; it will be "
+                         "skipped for any other hidden size in this Phase-1 demo.")
     ap.add_argument("--iters", type=int, default=200)
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16"])
@@ -135,10 +140,35 @@ def main():
     except Exception as e:
         print(f"  hip_stock build failed: {e}")
 
-    # Run sweep
+    # Correctness check FIRST — pointless to time wrong answers
     HIDDEN = 128
+    print("\n=== correctness check (n_rows=32) ===")
+    x_corr = torch.randn(32, HIDDEN, dtype=dtype, device=device)
+    w_corr = torch.randn(HIDDEN, dtype=dtype, device=device)
+    y_ref = rmsnorm_naive(x_corr, w_corr, 1e-6)
+    for name, fn in list(impls.items()):
+        if name == "torch_naive":
+            continue
+        try:
+            y_cand = fn(x_corr, w_corr, 1e-6)
+            atol = (y_ref - y_cand).abs().max().item()
+            rtol = ((y_ref - y_cand).abs() / (y_ref.abs() + 1e-6)).max().item()
+            ok = atol < 0.05 and rtol < 0.05  # bf16 has ~1e-2 representation error
+            tag = "✅" if ok else "❌"
+            print(f"  {tag} {name:>14}: atol={atol:.4f} rtol={rtol:.4f}")
+            if not ok:
+                print(f"      ref[0,:4] = {y_ref[0, :4].tolist()}")
+                print(f"      cand[0,:4]= {y_cand[0, :4].tolist()}")
+                impls.pop(name)
+                print(f"      ⚠ {name} REMOVED from benchmark — incorrect output")
+        except Exception as e:
+            print(f"  ❌ {name:>14}: crashed: {repr(e)[:120]}")
+            impls.pop(name)
+
+    # Run sweep
     n_rows_list = [int(x) for x in args.n_rows.split(",")]
-    results = {"operator": "rmsnorm_h128",
+    hidden_list = [int(x) for x in args.hidden.split(",")]
+    results = {"operator": "rmsnorm",
                "environment": {
                    "torch_version": torch.__version__,
                    "hip_version": torch.version.hip,
@@ -153,22 +183,27 @@ def main():
 
     print(f"\n{'n_rows':>8} {'hidden':>7} | " +
           " | ".join(f"{n:>14}" for n in impls.keys()))
-    for n_rows in n_rows_list:
-        x = torch.randn(n_rows, HIDDEN, dtype=dtype, device=device)
-        w = torch.randn(HIDDEN, dtype=dtype, device=device)
-        row = {"n_rows": n_rows, "hidden": HIDDEN, "latency_ms": {}}
-        for name, fn in impls.items():
-            try:
-                row["latency_ms"][name] = time_call(fn, (x, w, 1e-6), args.warmup, args.iters)
-            except Exception as e:
-                row["latency_ms"][name] = None
-                row.setdefault("errors", {})[name] = repr(e)[:200]
-        results["rows"].append(row)
-        cells = []
-        for name in impls.keys():
-            v = row["latency_ms"].get(name)
-            cells.append(f"{v:>12.4f} ms" if v is not None else f"{'ERROR':>14}")
-        print(f"{n_rows:>8d} {HIDDEN:>7d} | " + " | ".join(cells))
+    for hidden in hidden_list:
+        for n_rows in n_rows_list:
+            x = torch.randn(n_rows, hidden, dtype=dtype, device=device)
+            w = torch.randn(hidden, dtype=dtype, device=device)
+            row = {"n_rows": n_rows, "hidden": hidden, "latency_ms": {}}
+            for name, fn in impls.items():
+                # hip_stock is hard-coded for HIDDEN=128 — skip for other sizes
+                if name == "hip_stock" and hidden != HIDDEN:
+                    row["latency_ms"][name] = None
+                    continue
+                try:
+                    row["latency_ms"][name] = time_call(fn, (x, w, 1e-6), args.warmup, args.iters)
+                except Exception as e:
+                    row["latency_ms"][name] = None
+                    row.setdefault("errors", {})[name] = repr(e)[:200]
+            results["rows"].append(row)
+            cells = []
+            for name in impls.keys():
+                v = row["latency_ms"].get(name)
+                cells.append(f"{v:>12.4f} ms" if v is not None else f"{'-':>14}")
+            print(f"{n_rows:>8d} {hidden:>7d} | " + " | ".join(cells))
 
     Path(args.out).write_text(json.dumps(results, indent=2))
     print(f"\nWrote {args.out}")
