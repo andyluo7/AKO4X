@@ -1,0 +1,25 @@
+#include <torch/extension.h>
+#include <c10/hip/HIPStream.h>
+
+extern "C" void layernorm_launch(
+    const void* x, const void* w, const void* b, void* y,
+    int n_rows, int hidden, float eps, hipStream_t stream);
+
+void launch(torch::Tensor x, torch::Tensor w, torch::Tensor b, torch::Tensor y, double eps) {
+    TORCH_CHECK(x.is_contiguous() && w.is_contiguous() && b.is_contiguous() && y.is_contiguous(),
+                "tensors must be contiguous");
+    TORCH_CHECK(x.dim() == 2, "x must be 2-D [n_rows, hidden]");
+    TORCH_CHECK(w.dim() == 1 && w.size(0) == x.size(1), "w must be [hidden]");
+    TORCH_CHECK(b.dim() == 1 && b.size(0) == x.size(1), "b must be [hidden]");
+    TORCH_CHECK(y.sizes() == x.sizes(), "y must match x shape");
+    layernorm_launch(
+        x.data_ptr(), w.data_ptr(), b.data_ptr(), y.data_ptr(),
+        static_cast<int>(x.size(0)),
+        static_cast<int>(x.size(1)),
+        static_cast<float>(eps),
+        c10::hip::getCurrentHIPStream().stream());
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("launch", &launch, "v1_vector_loads LayerNorm");
+}
