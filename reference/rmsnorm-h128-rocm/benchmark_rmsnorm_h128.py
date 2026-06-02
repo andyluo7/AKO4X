@@ -70,26 +70,53 @@ def try_aiter_rmsnorm():
     return None
 
 
-def build_hip_kernel():
-    """Compile hip_stock.hip + binding into a torch extension; return launcher."""
+def _build_hip(module_name, hip_path, cpp_path):
+    """Generic load() of a {hip,cpp} pair into a torch extension."""
     from torch.utils.cpp_extension import load
-    src_dir = Path(__file__).parent / "baselines"
     module = load(
-        name="rmsnorm_h128_hip_stock",
-        sources=[
-            str(src_dir / "hip_stock.hip"),
-            str(src_dir / "hip_stock_binding.cpp"),
-        ],
+        name=module_name,
+        sources=[str(hip_path), str(cpp_path)],
         extra_cflags=["-O3"],
         extra_cuda_cflags=["-O3", "--offload-arch=gfx950"],
         verbose=False,
     )
-
     def call(x, w, eps):
         y = torch.empty_like(x)
-        module.launch(x, w, y, eps)  # type: ignore[attr-defined]
+        module.launch(x, w, y, eps)
         return y
     return call
+
+
+def build_hip_kernel():
+    """Compile the hip_stock baseline."""
+    src_dir = Path(__file__).parent / "baselines"
+    return _build_hip(
+        "rmsnorm_hip_stock",
+        src_dir / "hip_stock.hip",
+        src_dir / "hip_stock_binding.cpp",
+    )
+
+
+def build_variants():
+    """Auto-discover and build variants/<name>/{kernel.hip,binding.cpp} pairs."""
+    impls = {}
+    variants_dir = Path(__file__).parent / "variants"
+    if not variants_dir.is_dir():
+        return impls
+    for v in sorted(variants_dir.iterdir()):
+        if not v.is_dir():
+            continue
+        hip_f = v / "kernel.hip"
+        cpp_f = v / "binding.cpp"
+        if not (hip_f.exists() and cpp_f.exists()):
+            print(f"  variant {v.name}: missing kernel.hip or binding.cpp, skipped")
+            continue
+        try:
+            impls[v.name] = _build_hip(f"rmsnorm_variant_{v.name}", hip_f, cpp_f)
+            print(f"  variant {v.name}: built")
+        except Exception as e:
+            print(f"  variant {v.name}: build failed: {repr(e)[:200]}")
+    return impls
 
 
 def time_call(fn, args, warmup, iters):
@@ -139,6 +166,7 @@ def main():
         impls["hip_stock"] = build_hip_kernel()
     except Exception as e:
         print(f"  hip_stock build failed: {e}")
+    impls.update(build_variants())
 
     # Correctness check FIRST — pointless to time wrong answers
     HIDDEN = 128
@@ -181,8 +209,9 @@ def main():
                },
                "rows": []}
 
+    col_w = 10
     print(f"\n{'n_rows':>8} {'hidden':>7} | " +
-          " | ".join(f"{n:>14}" for n in impls.keys()))
+          " | ".join(f"{n[:col_w]:>{col_w}}" for n in impls.keys()))
     for hidden in hidden_list:
         for n_rows in n_rows_list:
             x = torch.randn(n_rows, hidden, dtype=dtype, device=device)
@@ -198,7 +227,7 @@ def main():
             cells = []
             for name in impls.keys():
                 v = row["latency_ms"].get(name)
-                cells.append(f"{v:>12.4f} ms" if v is not None else f"{'-':>14}")
+                cells.append(f"{v*1000:>{col_w-3}.1f}µs" if v is not None else f"{'-':>{col_w}}")
             print(f"{n_rows:>8d} {hidden:>7d} | " + " | ".join(cells))
 
     Path(args.out).write_text(json.dumps(results, indent=2))
