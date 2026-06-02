@@ -32,43 +32,62 @@ def rmsnorm_naive(x, w, eps=1e-6):
 
 
 def try_aiter_rmsnorm():
-    """Return a callable (x, w, eps) -> y if AITER is installed, else None."""
+    """Return a callable (x, w, eps) -> y if AITER is installed, else None.
+
+    AITER's API has shifted across versions; we probe a few known entry-point names
+    in order. Most recent: aiter.ops.norm.rms_norm  (older was rms_norm_fwd).
+    """
     try:
-        import aiter
-        # AITER's RMSNorm lives in aiter.ops.norm.rms_norm (signature may vary by version)
-        from aiter.ops.norm import rms_norm_fwd  # noqa
-        def call(x, w, eps):
-            return rms_norm_fwd(x, w, eps)
-        return call
-    except Exception as e:
-        print(f"  aiter not available: {e}")
+        import aiter  # noqa
+    except ImportError as e:
+        print(f"  aiter not installed: {e}")
         return None
+    # Try several known API paths
+    candidates = [
+        ("aiter.ops.norm", "rms_norm"),
+        ("aiter.ops.norm", "rms_norm_fwd"),
+        ("aiter", "rms_norm"),
+        ("aiter.ops.rmsnorm", "rms_norm_fwd"),
+    ]
+    for mod_path, name in candidates:
+        try:
+            mod = __import__(mod_path, fromlist=[name])
+            fn = getattr(mod, name)
+            # Probe signature: most accept (x, w, eps) and return y; some take y first
+            print(f"  aiter resolved to {mod_path}.{name}")
+            def call(x, w, eps, _fn=fn):
+                return _fn(x, w, eps)
+            return call
+        except (ImportError, AttributeError):
+            continue
+    # Last resort: list what's actually in aiter.ops.norm
+    try:
+        import aiter.ops.norm as n
+        attrs = [a for a in dir(n) if "norm" in a.lower() or "rms" in a.lower()]
+        print(f"  aiter present but no known rmsnorm entry; aiter.ops.norm has: {attrs}")
+    except Exception:
+        pass
+    return None
 
 
 def build_hip_kernel():
-    """Compile hip_stock.hip into a torch extension via load_inline; return launcher."""
+    """Compile hip_stock.hip + binding into a torch extension; return launcher."""
     from torch.utils.cpp_extension import load
     src_dir = Path(__file__).parent / "baselines"
     module = load(
         name="rmsnorm_h128_hip_stock",
-        sources=[str(src_dir / "hip_stock.hip")],
+        sources=[
+            str(src_dir / "hip_stock.hip"),
+            str(src_dir / "hip_stock_binding.cpp"),
+        ],
         extra_cflags=["-O3"],
         extra_cuda_cflags=["-O3", "--offload-arch=gfx950"],
-        verbose=True,
+        verbose=False,
     )
 
     def call(x, w, eps):
         y = torch.empty_like(x)
-        # The .hip file exposes a C function; torch's extension auto-binds via
-        # a generated stub for `extern "C"` symbols. Specifically for raw-symbol
-        # exports we need a tiny wrapper — see Phase-1.1 followup.
-        # Placeholder: if load_inline can't bind the raw C symbol, we'll wrap it
-        # with a PYBIND11_MODULE block in hip_stock_wrapper.cpp (Phase 1.5b).
-        module.rmsnorm_h128_launch(  # type: ignore[attr-defined]
-            x.data_ptr(), w.data_ptr(), y.data_ptr(),
-            x.shape[0], eps,
-            torch.cuda.current_stream().cuda_stream,
-        )
+        module.launch(x, w, y, eps)  # type: ignore[attr-defined]
         return y
     return call
 
