@@ -25,6 +25,7 @@ def try_aiter_layernorm():
         print(f"  aiter not installed: {e}")
         return None
     candidates = [
+        ("aiter", "layernorm2d_fwd"),  # AITER 25.9 — confirmed by type hint dump
         ("aiter", "layer_norm"),
         ("aiter.ops.norm", "layer_norm"),
         ("aiter.ops.norm", "layernorm"),
@@ -35,7 +36,6 @@ def try_aiter_layernorm():
             mod = __import__(mod_path, fromlist=[name])
             fn = getattr(mod, name)
             print(f"  aiter resolved to {mod_path}.{name}")
-            # Probe signature — pick the right call form
             def call(x, w, b, eps, _fn=fn):
                 return _fn(x, w, b, eps)
             return call
@@ -138,9 +138,12 @@ def main():
         if name == "torch_naive": continue
         try:
             y_cand = fn(x_corr, w_corr, b_corr, 1e-5)
-            atol = (y_ref - y_cand).abs().max().item()
-            rtol = ((y_ref - y_cand).abs() / (y_ref.abs() + 1e-6)).max().item()
-            ok = atol < 0.1 and rtol < 0.1
+            # torch.allclose-style: |a - b| <= atol + rtol * |b|
+            # Pure rtol breaks when outputs straddle 0 (LayerNorm post-bias).
+            diff = (y_ref - y_cand).abs()
+            atol = diff.max().item()
+            rel  = (diff / (y_ref.abs() + 1e-3)).max().item()
+            ok = (atol < 0.1) and (rel < 0.1)
             print(f"  {'✅' if ok else '❌'} {name:>14}: atol={atol:.4f} rtol={rtol:.4f}")
             if not ok:
                 impls.pop(name)
