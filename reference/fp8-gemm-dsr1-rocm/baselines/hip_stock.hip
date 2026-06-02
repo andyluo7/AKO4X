@@ -15,14 +15,30 @@
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
-#include <hip/hip_fp8.h>
 
 #define BM 16
 #define BN 16
 
+// e4m3_fnuz manual decode — ROCm 7.0's hip_fp8.h `operator float()` is host-only,
+// so we work directly off the raw byte. fnuz format: 1 sign + 4 exp (bias 8) + 3 mant,
+// 0x80 is NaN, only one zero. Adequate for a correctness-anchor kernel.
+__device__ __forceinline__ float fp8_e4m3_fnuz_to_float(unsigned char raw) {
+    if (raw == 0x80) return __builtin_nanf("");
+    unsigned int sign = raw & 0x80u;
+    int exp = (raw >> 3) & 0xF;
+    unsigned int mant = raw & 0x7u;
+    float val;
+    if (exp == 0) {
+        val = static_cast<float>(mant) * (1.0f / 1024.0f);   // 2^-7 * mant/8
+    } else {
+        val = (1.0f + static_cast<float>(mant) * 0.125f) * exp2f(static_cast<float>(exp - 8));
+    }
+    return sign ? -val : val;
+}
+
 __global__ void fp8_gemm_stock_kernel(
-    const __hip_fp8_e4m3_fnuz* __restrict__ a,
-    const __hip_fp8_e4m3_fnuz* __restrict__ b,
+    const unsigned char* __restrict__ a,
+    const unsigned char* __restrict__ b,
     const float* __restrict__ scale_a,
     const float* __restrict__ scale_b,
     __hip_bfloat16* __restrict__ c,
@@ -33,11 +49,11 @@ __global__ void fp8_gemm_stock_kernel(
     if (m >= M || n >= N) return;
 
     float acc = 0.f;
-    const __hip_fp8_e4m3_fnuz* a_row = a + m * K;
-    const __hip_fp8_e4m3_fnuz* b_row = b + n * K;
+    const unsigned char* a_row = a + m * K;
+    const unsigned char* b_row = b + n * K;
     for (int k = 0; k < K; ++k) {
-        float av = static_cast<float>(a_row[k]);
-        float bv = static_cast<float>(b_row[k]);
+        float av = fp8_e4m3_fnuz_to_float(a_row[k]);
+        float bv = fp8_e4m3_fnuz_to_float(b_row[k]);
         acc += av * bv;
     }
     acc *= scale_a[m] * scale_b[n];
@@ -52,8 +68,8 @@ extern "C" void fp8_gemm_launch(
     dim3 grid((M + BM - 1) / BM, (N + BN - 1) / BN);
     dim3 block(BM, BN);
     fp8_gemm_stock_kernel<<<grid, block, 0, stream>>>(
-        static_cast<const __hip_fp8_e4m3_fnuz*>(a),
-        static_cast<const __hip_fp8_e4m3_fnuz*>(b),
+        static_cast<const unsigned char*>(a),
+        static_cast<const unsigned char*>(b),
         static_cast<const float*>(scale_a),
         static_cast<const float*>(scale_b),
         static_cast<__hip_bfloat16*>(c),

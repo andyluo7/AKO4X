@@ -15,15 +15,15 @@ import torch
 from baselines.torch_naive import fp8_gemm_naive
 
 
-FP8_DTYPE = torch.float8_e4m3fnuz  # ROCm-native FP8 (fnuz = finite, no -0/NaN)
+FP8_DTYPE = torch.float8_e4m3fnuz  # ROCm-native (used by AITER + our hip_stock)
 
 
-def quantize_per_token(x_bf16):
+def quantize_per_token(x_bf16, dtype=FP8_DTYPE):
     """Per-row absmax quant: returns (fp8 tensor, fp32 scale [rows])."""
+    fp8_max = 240.0 if dtype == torch.float8_e4m3fnuz else 448.0  # e4m3fn vs fnuz
     amax = x_bf16.abs().to(torch.float32).amax(dim=-1).clamp(min=1e-4)
-    fp8_max = 240.0  # e4m3fnuz max
     scale = amax / fp8_max
-    q = (x_bf16.to(torch.float32) / scale.view(-1, 1)).clamp(-fp8_max, fp8_max).to(FP8_DTYPE)
+    q = (x_bf16.to(torch.float32) / scale.view(-1, 1)).clamp(-fp8_max, fp8_max).to(dtype)
     return q, scale
 
 
@@ -46,14 +46,11 @@ def try_aiter_fp8_gemm():
             fn = getattr(mod, name)
             print(f"  aiter resolved to {mod_path}.{name}")
             def call(a, b, scale_a, scale_b, _fn=fn):
-                # Most AITER FP8 GEMMs expect (a, b, scale_a, scale_b, out_dtype)
-                # — let's try the common signature and fall back to constructing out.
-                try:
-                    return _fn(a, b, scale_a, scale_b, torch.bfloat16)
-                except TypeError:
-                    out = torch.empty(a.size(0), b.size(0), dtype=torch.bfloat16, device=a.device)
-                    _fn(a, b, scale_a, scale_b, out)
-                    return out
+                # AITER 25.9 sig: gemm_a8w8(a, b, scale_a, scale_b, bias=None, dtype=bf16)
+                # scales are typically [M,1] / [1,N] (broadcast-shaped) in this path.
+                sa = scale_a.view(-1, 1).to(torch.float32)
+                sb = scale_b.view(1, -1).to(torch.float32)
+                return _fn(a, b, sa, sb, None, torch.bfloat16)
             return call
         except (ImportError, AttributeError):
             continue
@@ -67,26 +64,29 @@ def try_aiter_fp8_gemm():
 
 
 def try_torch_scaled_mm():
-    """torch._scaled_mm: HIPBLASLT-backed FP8 GEMM on recent torch+rocm.
-
-    Signature varies by torch version. Returns None if unavailable / signature
-    not matched.
+    """torch._scaled_mm: hipBLASLt-backed FP8 GEMM. ROCm 7 build wants OCP e4m3fn
+    (not fnuz). We re-quantize inputs to fn just for this backend so AITER + hip_stock
+    keep their native fnuz path.
     """
     if not hasattr(torch, "_scaled_mm"):
         print("  torch._scaled_mm not present")
         return None
-    def call(a, b, scale_a, scale_b):
-        # b is [N, K] (weight layout); _scaled_mm wants [K, N], so transpose-view.
-        # _scaled_mm expects 2-D scales for per-token/per-channel on recent torch.
-        try:
-            return torch._scaled_mm(
-                a, b.t(),
-                scale_a=scale_a.view(-1, 1),
-                scale_b=scale_b.view(1, -1),
-                out_dtype=torch.bfloat16,
-            )
-        except Exception as e:
-            raise RuntimeError(f"_scaled_mm call failed: {e!r}")
+    fp8_fn = getattr(torch, "float8_e4m3fn", None)
+    if fp8_fn is None:
+        print("  torch.float8_e4m3fn not present in this torch build")
+        return None
+    cache = {}
+    def call(a_fnuz, b_fnuz, scale_a, scale_b):
+        key = (a_fnuz.data_ptr(), b_fnuz.data_ptr())
+        if key not in cache:
+            # One-shot requant fnuz->fn outside timed loop (warmup absorbs it).
+            a_bf = (a_fnuz.to(torch.float32) * scale_a.view(-1, 1)).to(torch.bfloat16)
+            b_bf = (b_fnuz.to(torch.float32) * scale_b.view(-1, 1)).to(torch.bfloat16)
+            a_fn, sa = quantize_per_token(a_bf, dtype=fp8_fn)
+            b_fn, sb = quantize_per_token(b_bf, dtype=fp8_fn)
+            cache[key] = (a_fn, b_fn, sa.view(-1, 1), sb.view(1, -1))
+        a_fn, b_fn, sa, sb = cache[key]
+        return torch._scaled_mm(a_fn, b_fn.t(), scale_a=sa, scale_b=sb, out_dtype=torch.bfloat16)
     return call
 
 
