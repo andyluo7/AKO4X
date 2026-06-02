@@ -1,0 +1,135 @@
+{
+  "operator": "rmsnorm",
+  "environment": {
+    "torch_version": "2.9.0.dev20250821+rocm7.0.0.git125803b7",
+    "hip_version": "7.0.51831-a3e329ad8",
+    "device_name": "AMD Instinct MI350X VF",
+    "dtype": "bfloat16"
+  },
+  "benchmark_config": {
+    "warmup": 5,
+    "iters": 200
+  },
+  "rows": [
+    {
+      "n_rows": 1,
+      "hidden": 128,
+      "latency_ms": {
+        "torch_naive": 0.04087890501978109,
+        "aiter_tuned": 0.01143514000432333,
+        "hip_stock": 0.004606639995472506,
+        "v1_vector_loads": 0.004738095012726262
+      }
+    },
+    {
+      "n_rows": 128,
+      "hidden": 128,
+      "latency_ms": {
+        "torch_naive": 0.043843089988513384,
+        "aiter_tuned": 0.011898330012627412,
+        "hip_stock": 0.00466274497739505,
+        "v1_vector_loads": 0.004857385029026773
+      }
+    },
+    {
+      "n_rows": 1024,
+      "hidden": 128,
+      "latency_ms": {
+        "torch_naive": 0.04442172499693697,
+        "aiter_tuned": 0.010431154987600166,
+        "hip_stock": 0.004657395002141129,
+        "v1_vector_loads": 0.004795995009772014
+      }
+    },
+    {
+      "n_rows": 8192,
+      "hidden": 128,
+      "latency_ms": {
+        "torch_naive": 0.04467217000637902,
+        "aiter_tuned": 0.011968475009780377,
+        "hip_stock": 0.004788735022884794,
+        "v1_vector_loads": 0.0048365399925387464
+      }
+    },
+    {
+      "n_rows": 1,
+      "hidden": 4096,
+      "latency_ms": {
+        "torch_naive": 0.04388928999105701,
+        "aiter_tuned": 0.009194790000037756,
+        "hip_stock": 0.005383425013860688,
+        "v1_vector_loads": 0.004781895004271064
+      }
+    },
+    {
+      "n_rows": 128,
+      "hidden": 4096,
+      "latency_ms": {
+        "torch_naive": 0.04362239498732379,
+        "aiter_tuned": 0.010147965003852732,
+        "hip_stock": 0.005529674999706913,
+        "v1_vector_loads": 0.004867190000368282
+      }
+    },
+    {
+      "n_rows": 1024,
+      "hidden": 4096,
+      "latency_ms": {
+        "torch_naive": 0.06446720999520039,
+        "aiter_tuned": 0.011050495013478212,
+        "hip_stock": 0.007263480001711287,
+        "v1_vector_loads": 0.004952335002599284
+      }
+    },
+    {
+      "n_rows": 8192,
+      "hidden": 4096,
+      "latency_ms": {
+        "torch_naive": 0.3546139299942297,
+        "aiter_tuned": 0.023023915018711705,
+        "hip_stock": 0.04217683501337888,
+        "v1_vector_loads": 0.022440430002461653
+      }
+    },
+    {
+      "n_rows": 1,
+      "hidden": 7168,
+      "latency_ms": {
+        "torch_naive": 0.0432500050010276,
+        "aiter_tuned": 0.009082990000024438,
+        "hip_stock": 0.007497474980482366,
+        "v1_vector_loads": 0.004709640015789773
+      }
+    },
+    {
+      "n_rows": 128,
+      "hidden": 7168,
+      "latency_ms": {
+        "torch_naive": 0.043406799995864276,
+        "aiter_tuned": 0.010128764988621697,
+        "hip_stock": 0.008058414969127625,
+        "v1_vector_loads": 0.0049291849791188724
+      }
+    },
+    {
+      "n_rows": 1024,
+      "hidden": 7168,
+      "latency_ms": {
+        "torch_naive": 0.09165903498796979,
+        "aiter_tuned": 0.011031994981749449,
+        "hip_stock": 0.013019799989706371,
+        "v1_vector_loads": 0.006588744981854688
+      }
+    },
+    {
+      "n_rows": 8192,
+      "hidden": 7168,
+      "latency_ms": {
+        "torch_naive": 0.6385235400011879,
+        "aiter_tuned": 0.040002980022109114,
+        "hip_stock": 0.0729486699856352,
+        "v1_vector_loads": 0.047017114993650466
+      }
+    }
+  ]
+}
