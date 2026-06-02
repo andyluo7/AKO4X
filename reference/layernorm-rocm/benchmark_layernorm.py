@@ -144,7 +144,7 @@ def main():
             atol = diff.max().item()
             rel  = (diff / (y_ref.abs() + 1e-3)).max().item()
             ok = (atol < 0.1) and (rel < 0.1)
-            print(f"  {'✅' if ok else '❌'} {name:>14}: atol={atol:.4f} rtol={rtol:.4f}")
+            print(f"  {'✅' if ok else '❌'} {name:>14}: atol={atol:.4f} rel={rel:.4f}")
             if not ok:
                 impls.pop(name)
                 print(f"      ⚠ {name} REMOVED")
