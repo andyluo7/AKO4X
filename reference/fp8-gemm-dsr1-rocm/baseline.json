@@ -15,7 +15,7 @@
   },
   "benchmark_config": {
     "warmup": 5,
-    "iters": 200
+    "iters": 100
   },
   "rows": [
     {
@@ -23,16 +23,26 @@
       "N": 7168,
       "K": 2048,
       "latency_us": {
-        "hipblaslt_scaled_mm": 79.75715001521166,
-        "aiter_a8w8": 89.27714501623996,
-        "aiter_a8w8_bpreshuffle": 78.99326497863512,
-        "hip_stock": 114707.74560501013
+        "hipblaslt_scaled_mm": 80.37531995796598,
+        "aiter_a8w8": 89.19023006455973,
+        "aiter_a8w8_bpreshuffle": 82.15868001570925,
+        "hip_stock": 114766.27999996708,
+        "v1_mfma_tile": 468.483959994046,
+        "v2_wider_tile": 264.88153998798225,
+        "v3_double_buffer": 272.45889003097545,
+        "v4_bigger_mfma": 264.9235499848146,
+        "v5_block_256x128": 305.1164100179449
       },
       "tflops": {
-        "hipblaslt_scaled_mm": 1507.815716397384,
-        "aiter_a8w8": 1347.0310264303846,
-        "aiter_a8w8_bpreshuffle": 1522.3966792678568,
-        "hip_stock": 1.0483954998305487
+        "hipblaslt_scaled_mm": 1496.2190427471032,
+        "aiter_a8w8": 1348.343694157435,
+        "aiter_a8w8_bpreshuffle": 1463.7416796984287,
+        "hip_stock": 1.047860785311108,
+        "v1_mfma_tile": 256.69840284292417,
+        "v2_wider_tile": 454.01081665961397,
+        "v3_double_buffer": 441.3843287489276,
+        "v4_bigger_mfma": 453.938822331549,
+        "v5_block_256x128": 394.1416467273169
       }
     }
   ]

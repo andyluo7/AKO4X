@@ -2,6 +2,17 @@
 // v5_block_256x128 — bigger output block (256×128) with 8 waves in a 4×2
 // grid. Attacks the bandwidth-bound ceiling that v2/v3/v4 all hit at 265µs.
 //
+// === DEAD-END: slower than v2 (305µs vs 265µs) ===
+// Bandwidth-bound thesis FALSIFIED. Reducing B's redundant DRAM load by 2×
+// did NOT translate into a speedup — v5 measured slower. Likely causes:
+// (1) 24KB LDS + 512 threads → only 1 block/CU (was 2 at v2's 16KB).
+// (2) Only 16×56 = 896 blocks vs v2's 32×56 = 1792 — less work for the
+//     wavefront scheduler to hide latency across.
+// Real bottleneck at the 265µs ceiling is probably LDS bank conflicts
+// (no swizzle) and lack of async global→LDS loads. Both are deeper
+// rewrites; deferred to v6+ (would need __builtin_amdgcn_global_load_lds
+// + per-bank LDS layout).
+//
 // === Delta from v2_wider_tile ===
 // 1) BM=256 (was 128). B is now loaded only M/BM = 16× redundantly (was 32×).
 //    Total LDS-load amplification drops from ~940MB to ~704MB (25% less).

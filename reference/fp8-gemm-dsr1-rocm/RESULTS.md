@@ -51,13 +51,39 @@ reference/fp8-gemm-dsr1-rocm/
 └── variants/  (empty)
 ```
 
-## What's next — v1 directions
+## Variants (5 attempts, 1 win, 3 dead-ends)
 
-- ✅ **bpreshuffle delivered** — landed as a baseline (vendor tuning trick, not a custom
-  kernel). Sets the new bar at ~79 µs / 1522 TFLOP/s.
-- 🚧 **`v1_mfma_tile`** in progress — handwritten HIP kernel using `mfma_f32_16x16x32_fp8_fp8`.
-  First commit: correctness-first scaffold (64×64 block, 4 waves, single-buffered LDS,
-  scales in epilogue). Expected to be slow until iterated; the goal of v1 is correctness,
-  v2+ adds double-buffering / global_load_lds / wider tiles.
-- ⏭️ **`v2_tilelang`** (deferred) — same MFMA tile written in TileLang DSL with autotuner
-  sweep. Depends on TileLang's gfx950 support being solid.
+Latest run, all variants ran for 100 iters after 5 warmup:
+
+| variant | latency | TFLOP/s | vs v1 | result |
+|---|---:|---:|---:|---|
+| v1_mfma_tile (64×64 block, 4 waves, single LDS)         | 468.5 µs | 257 | 1.00× | ✅ baseline (correctness anchor) |
+| **v2_wider_tile** (128×128 block, 4 waves)              | **264.9 µs** | **454** | **1.77×** | ✅ **THE WIN** |
+| v3_double_buffer (v2 + 2-stage LDS pipeline)            | 272.5 µs | 441 | 1.72× | ❌ tied v2 (compiler already overlaps) |
+| v4_bigger_mfma (v2 + mfma_32x32x16)                     | 264.9 µs | 454 | 1.77× | ❌ tied v2 (dispatch ≠ bottleneck) |
+| v5_block_256x128 (256×128 block, 8 waves)               | 305.1 µs | 394 | 1.54× | ❌ slower (occupancy collapsed) |
+
+**Headline:** v2 → 1.77× over v1; **but still 3.3× behind hipBLASLt** (264.9 µs vs 80.4 µs).
+
+## What the dead-ends taught us
+
+- **v3 (double-buffer):** with regular global loads, the HIP compiler already issues
+  loads ahead of MFMA work via instruction scheduling. Explicit software double-buffering
+  doesn't add overlap that wasn't already there. To actually buy a win, would need
+  `__builtin_amdgcn_global_load_lds` for true async DRAM→LDS.
+- **v4 (32x32x16 MFMA):** halved MFMA dispatch count, zero speedup. MFMA dispatch
+  overhead is not the bottleneck at this tile size.
+- **v5 (256×128):** reduced redundant DRAM traffic ~25%, got *slower*. The 24KB LDS
+  footprint forced 1 block/CU (was 2), and total block count dropped to 896 (was 1792)
+  — the wavefront scheduler had less to interleave.
+
+Three different optimization theses (load latency, MFMA dispatch, DRAM amplification)
+all rejected. The remaining ~3× gap to hipBLASLt likely lives in:
+
+- **Bank-conflict-free LDS swizzle** (we use naive row-major).
+- **`__builtin_amdgcn_global_load_lds`** for true async DRAM→LDS bypass of VGPRs.
+- **Multi-stage software pipelining** (not just 2-stage).
+
+Each is a multi-day rewrite. The closed-loop archive captures the structured
+negative learning so a future round (or a different agent) does not retry the
+already-failed levers.
