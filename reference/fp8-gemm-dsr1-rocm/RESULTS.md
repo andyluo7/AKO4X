@@ -31,6 +31,7 @@ Latest run on MI355X, all variants ran for 100 iters after 5 warmup:
 | v5_block_256x128 (256×128 block, 8 waves)               | 280.3 µs | 429   | 1.54× | ❌ slower (occupancy collapsed) |
 | v6_lds_swizzle (v2 + 8-byte LDS row pad)                | 138.5 µs | 868   | 3.10× | ✅ was anchor (beat by v7) |
 | **v7_8wave** (v6 + 8 waves/block, 24 waves/CU)          | **102.3 µs** | **1175** | **4.20×** | ✅ **THE ANCHOR** |
+| v8_wider_n (BN=256, 25% less DRAM, 16 waves/CU)         | 109.8 µs | 1095  | 3.91× | ❌ slower (MFMA latency exposed at 16 waves/CU) |
 
 **Headline:** v7 → 1.35× over v6, 4.2× over v1; **still 1.37× behind AITER bpreshuffle** (102.3 µs vs 74.7 µs).
 
