@@ -28,25 +28,47 @@ def quantize_per_token(x_bf16, dtype=FP8_DTYPE):
 
 
 def aiter_callers():
-    """Return dict of {label: callable} for each available AITER FP8 GEMM path."""
+    """Return dict of {label: callable} for each available AITER FP8 GEMM path.
+
+    `aiter_a8w8`             — generic CK path, takes row-major weight.
+    `aiter_a8w8_bpreshuffle` — fast FP8 path on MI300/MI350; requires the weight
+        pre-shuffled with aiter.ops.shuffle.shuffle_weight. We cache the shuffle
+        per b.data_ptr() so it runs once (in warmup) and the timed loop measures
+        only the GEMM. This matches real inference: weights are shuffled at load
+        time, not per request.
+    """
     try:
         import aiter
     except ImportError as e:
         print(f"  aiter not installed: {e}")
         return {}
     out = {}
-    for fname in ("gemm_a8w8", "gemm_a8w8_bpreshuffle"):
-        fn = getattr(aiter, fname, None)
-        if fn is None:
-            continue
-        def make(_fn, _name):
-            def call(a, b, scale_a, scale_b):
-                sa = scale_a.view(-1, 1).to(torch.float32)
-                sb = scale_b.view(1, -1).to(torch.float32)
-                return _fn(a, b, sa, sb, None, torch.bfloat16)
-            return call
-        out[f"aiter_{fname.replace('gemm_a8w8', 'a8w8')}"] = make(fn, fname)
-        print(f"  aiter path: {fname}")
+    fn = getattr(aiter, "gemm_a8w8", None)
+    if fn is not None:
+        def call_plain(a, b, scale_a, scale_b, _fn=fn):
+            sa = scale_a.view(-1, 1).to(torch.float32)
+            sb = scale_b.view(1, -1).to(torch.float32)
+            return _fn(a, b, sa, sb, None, torch.bfloat16)
+        out["aiter_a8w8"] = call_plain
+        print("  aiter path: gemm_a8w8")
+
+    fn_sh = getattr(aiter, "gemm_a8w8_bpreshuffle", None)
+    try:
+        from aiter.ops.shuffle import shuffle_weight
+    except ImportError:
+        shuffle_weight = None
+    if fn_sh is not None and shuffle_weight is not None:
+        shuf_cache = {}
+        def call_bpre(a, b, scale_a, scale_b, _fn=fn_sh, _sh=shuffle_weight):
+            key = b.data_ptr()
+            if key not in shuf_cache:
+                shuf_cache[key] = _sh(b)
+            b_shuf = shuf_cache[key]
+            sa = scale_a.view(-1, 1).to(torch.float32)
+            sb = scale_b.view(1, -1).to(torch.float32)
+            return _fn(a, b_shuf, sa, sb, None, torch.bfloat16)
+        out["aiter_a8w8_bpreshuffle"] = call_bpre
+        print("  aiter path: gemm_a8w8_bpreshuffle (weight preshuffled, one-shot cached)")
     return out
 
 
