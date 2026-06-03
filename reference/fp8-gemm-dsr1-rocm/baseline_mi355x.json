@@ -1,0 +1,49 @@
+{
+  "operator": "fp8_gemm_dsr1",
+  "shape": {
+    "M": 4096,
+    "N": 7168,
+    "K": 2048
+  },
+  "environment": {
+    "torch_version": "2.12.0.dev20260326+rocm7.1",
+    "hip_version": "7.1.52802",
+    "device_name": "AMD Instinct MI355X",
+    "input_dtype": "float8_e4m3fn",
+    "output_dtype": "bfloat16",
+    "scale_scheme": "per-token-A + per-channel-B"
+  },
+  "benchmark_config": {
+    "warmup": 5,
+    "iters": 100
+  },
+  "rows": [
+    {
+      "M": 4096,
+      "N": 7168,
+      "K": 2048,
+      "latency_us": {
+        "aiter_a8w8": 93.41815952211618,
+        "aiter_a8w8_bpreshuffle": 74.10844787955284,
+        "hip_stock": 104923.11491863802,
+        "v1_mfma_tile": 430.29766995459795,
+        "v2_wider_tile": 242.91735142469406,
+        "v3_double_buffer": 252.42346106097102,
+        "v4_bigger_mfma": 243.0729498155415,
+        "v5_block_256x128": 280.322281178087,
+        "v6_lds_swizzle": 137.67991913482547
+      },
+      "tflops": {
+        "aiter_a8w8": 1287.3202052276506,
+        "aiter_a8w8_bpreshuffle": 1622.7446091362617,
+        "hip_stock": 1.1461638780096661,
+        "v1_mfma_tile": 279.47881823456987,
+        "v2_wider_tile": 495.06173018390206,
+        "v3_double_buffer": 476.41801511846126,
+        "v4_bigger_mfma": 494.74482610779967,
+        "v5_block_256x128": 429.00294540482906,
+        "v6_lds_swizzle": 873.4685860051544
+      }
+    }
+  ]
+}
