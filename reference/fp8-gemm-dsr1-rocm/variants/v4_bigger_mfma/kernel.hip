@@ -5,6 +5,14 @@
 // we issue 16 MFMA dispatches instead of 32. Same total FLOPS, half the
 // dispatch overhead.
 //
+// === DEAD-END: tied v2, did not beat ===
+// v4 measured 264.9µs vs v2's 264.7µs — exact tie. Confirmed: MFMA dispatch
+// overhead is NOT the bottleneck. v2/v3/v4 all hit the same ~265µs ceiling
+// regardless of MFMA shape or LDS pipelining, which means we're bandwidth-bound
+// from per-block LDS-load amplification (A loaded N/BN = 56× redundantly,
+// B loaded M/BM = 32× redundantly). The fix is wider tiles (v5+), not
+// MFMA-shape tuning.
+//
 // === Delta from v2_wider_tile ===
 // 1) MFMA: f32_32x32x16_fp8_fp8 (was 16x16x32). Bigger output tile per MFMA.
 // 2) MFMA_K = 16 (was 32). BLOCK_MFMA_K = BK/16 = 4 (was 2). 4 K-steps per outer iter.
