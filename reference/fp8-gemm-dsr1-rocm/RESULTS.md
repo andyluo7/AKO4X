@@ -18,7 +18,7 @@
 hipBLASLt (`torch._scaled_mm`) crashes on the small correctness-check shape with `HIPBLAS_STATUS_INVALID_VALUE`
 on torch 2.12+rocm7.1 — excluded.
 
-## Variants (6 attempts, 2 wins, 3 dead-ends)
+## Variants (7 attempts, 2 wins, 4 dead-ends)
 
 Latest run on MI355X, all variants ran for 100 iters after 5 warmup:
 
@@ -32,8 +32,9 @@ Latest run on MI355X, all variants ran for 100 iters after 5 warmup:
 | v6_lds_swizzle (v2 + 8-byte LDS row pad)                | 138.5 µs | 868   | 3.10× | ✅ was anchor (beat by v7) |
 | **v7_8wave** (v6 + 8 waves/block, 24 waves/CU)          | **102.3 µs** | **1175** | **4.20×** | ✅ **THE ANCHOR** |
 | v8_wider_n (BN=256, 25% less DRAM, 16 waves/CU)         | 109.8 µs | 1095  | 3.91× | ❌ slower (MFMA latency exposed at 16 waves/CU) |
+| v9_256n_16w (BN=256, 16 waves/block, 32 waves/CU)       | 113.5 µs | 1060  | 3.79× | ❌ slower (2 blocks/CU → 128 concurrent blocks vs v7's 192) |
 
-**Headline:** v7 → 1.35× over v6, 4.2× over v1; **still 1.37× behind AITER bpreshuffle** (102.3 µs vs 74.7 µs).
+**Headline:** v7 → 1.35× over v6, 4.2× over v1; **still 1.40× behind AITER bpreshuffle** (101.6 µs vs 72.4 µs).
 
 ## What the results taught us
 
@@ -47,6 +48,11 @@ Latest run on MI355X, all variants ran for 100 iters after 5 warmup:
 - **v5 (256×128):** reduced redundant DRAM traffic ~25%, got *slower*. The 24KB LDS
   footprint forced 1 block/CU (was 2), and total block count dropped (896 vs 1792)
   — the wavefront scheduler had less to interleave.
+- **v8 (BN=256, 8 waves/block → 16 waves/CU):** exactly at MFMA latency threshold;
+  any overhead caused stalls. 2 blocks/CU = 896 concurrent blocks vs v7's 1344, reducing ILP.
+- **v9 (BN=256, 16 waves/block → 32 waves/CU):** wave count no longer the limit; root cause
+  is structural — 2 blocks/CU means only 128 concurrent blocks at 64 CUs vs v7's 192, less
+  wavefront-level ILP across the chip. BN=256 is ruled out regardless of wave count.
 
 ### Win: v7 — more waves per block
 
