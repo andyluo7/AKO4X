@@ -15,78 +15,53 @@ import torch
 from baselines.torch_naive import fp8_gemm_naive
 
 
-FP8_DTYPE = torch.float8_e4m3fnuz  # ROCm-native (used by AITER + our hip_stock)
+FP8_DTYPE = torch.float8_e4m3fn  # OCP fp8 — gfx950 supports natively; AITER + hipBLASLt both want this
 
 
 def quantize_per_token(x_bf16, dtype=FP8_DTYPE):
     """Per-row absmax quant: returns (fp8 tensor, fp32 scale [rows])."""
-    fp8_max = 240.0 if dtype == torch.float8_e4m3fnuz else 448.0  # e4m3fn vs fnuz
+    fp8_max = 240.0 if dtype == torch.float8_e4m3fnuz else 448.0  # fnuz vs fn
     amax = x_bf16.abs().to(torch.float32).amax(dim=-1).clamp(min=1e-4)
     scale = amax / fp8_max
     q = (x_bf16.to(torch.float32) / scale.view(-1, 1)).clamp(-fp8_max, fp8_max).to(dtype)
     return q, scale
 
 
-def try_aiter_fp8_gemm():
+def aiter_callers():
+    """Return dict of {label: callable} for each available AITER FP8 GEMM path."""
     try:
         import aiter
     except ImportError as e:
         print(f"  aiter not installed: {e}")
-        return None
-    # AITER 25.9 FP8 GEMM API names shift across versions; probe several.
-    candidates = [
-        ("aiter", "gemm_a8w8"),
-        ("aiter", "gemm_a8w8_bpreshuffle"),
-        ("aiter.ops.gemm_op_a8w8", "gemm_a8w8"),
-        ("aiter.ops.gemm", "gemm_a8w8"),
-    ]
-    for mod_path, name in candidates:
-        try:
-            mod = __import__(mod_path, fromlist=[name])
-            fn = getattr(mod, name)
-            print(f"  aiter resolved to {mod_path}.{name}")
-            def call(a, b, scale_a, scale_b, _fn=fn):
-                # AITER 25.9 sig: gemm_a8w8(a, b, scale_a, scale_b, bias=None, dtype=bf16)
-                # scales are typically [M,1] / [1,N] (broadcast-shaped) in this path.
+        return {}
+    out = {}
+    for fname in ("gemm_a8w8", "gemm_a8w8_bpreshuffle"):
+        fn = getattr(aiter, fname, None)
+        if fn is None:
+            continue
+        def make(_fn, _name):
+            def call(a, b, scale_a, scale_b):
                 sa = scale_a.view(-1, 1).to(torch.float32)
                 sb = scale_b.view(1, -1).to(torch.float32)
                 return _fn(a, b, sa, sb, None, torch.bfloat16)
             return call
-        except (ImportError, AttributeError):
-            continue
-    try:
-        import aiter as a
-        attrs = [x for x in dir(a) if "gemm" in x.lower() or "a8w8" in x.lower()]
-        print(f"  aiter present but no known FP8 GEMM; aiter has: {attrs[:20]}")
-    except Exception:
-        pass
-    return None
+        out[f"aiter_{fname.replace('gemm_a8w8', 'a8w8')}"] = make(fn, fname)
+        print(f"  aiter path: {fname}")
+    return out
 
 
 def try_torch_scaled_mm():
-    """torch._scaled_mm: hipBLASLt-backed FP8 GEMM. ROCm 7 build wants OCP e4m3fn
-    (not fnuz). We re-quantize inputs to fn just for this backend so AITER + hip_stock
-    keep their native fnuz path.
-    """
+    """torch._scaled_mm: hipBLASLt-backed FP8 GEMM."""
     if not hasattr(torch, "_scaled_mm"):
         print("  torch._scaled_mm not present")
         return None
-    fp8_fn = getattr(torch, "float8_e4m3fn", None)
-    if fp8_fn is None:
-        print("  torch.float8_e4m3fn not present in this torch build")
-        return None
-    cache = {}
-    def call(a_fnuz, b_fnuz, scale_a, scale_b):
-        key = (a_fnuz.data_ptr(), b_fnuz.data_ptr())
-        if key not in cache:
-            # One-shot requant fnuz->fn outside timed loop (warmup absorbs it).
-            a_bf = (a_fnuz.to(torch.float32) * scale_a.view(-1, 1)).to(torch.bfloat16)
-            b_bf = (b_fnuz.to(torch.float32) * scale_b.view(-1, 1)).to(torch.bfloat16)
-            a_fn, sa = quantize_per_token(a_bf, dtype=fp8_fn)
-            b_fn, sb = quantize_per_token(b_bf, dtype=fp8_fn)
-            cache[key] = (a_fn, b_fn, sa.view(-1, 1), sb.view(1, -1))
-        a_fn, b_fn, sa, sb = cache[key]
-        return torch._scaled_mm(a_fn, b_fn.t(), scale_a=sa, scale_b=sb, out_dtype=torch.bfloat16)
+    def call(a, b, scale_a, scale_b):
+        return torch._scaled_mm(
+            a, b.t(),
+            scale_a=scale_a.view(-1, 1),
+            scale_b=scale_b.view(1, -1),
+            out_dtype=torch.bfloat16,
+        )
     return call
 
 
@@ -161,9 +136,7 @@ def main():
     scaled = try_torch_scaled_mm()
     if scaled is not None:
         impls["hipblaslt_scaled_mm"] = scaled
-    aiter_call = try_aiter_fp8_gemm()
-    if aiter_call is not None:
-        impls["aiter_tuned"] = aiter_call
+    impls.update(aiter_callers())
     try:
         impls["hip_stock"] = build_hip_stock()
     except Exception as e:

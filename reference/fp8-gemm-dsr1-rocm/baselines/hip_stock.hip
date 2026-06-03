@@ -19,19 +19,19 @@
 #define BM 16
 #define BN 16
 
-// e4m3_fnuz manual decode — ROCm 7.0's hip_fp8.h `operator float()` is host-only,
-// so we work directly off the raw byte. fnuz format: 1 sign + 4 exp (bias 8) + 3 mant,
-// 0x80 is NaN, only one zero. Adequate for a correctness-anchor kernel.
-__device__ __forceinline__ float fp8_e4m3_fnuz_to_float(unsigned char raw) {
-    if (raw == 0x80) return __builtin_nanf("");
+// e4m3fn (OCP) manual decode — ROCm 7.0's hip_fp8.h `operator float()` is host-only,
+// so we decode the raw byte directly. fn format: 1 sign + 4 exp (bias 7) + 3 mant,
+// max ±448; NaN = s.1111.111 (0x7F / 0xFF); ±0 distinct; no infinity.
+__device__ __forceinline__ float fp8_e4m3fn_to_float(unsigned char raw) {
     unsigned int sign = raw & 0x80u;
     int exp = (raw >> 3) & 0xF;
     unsigned int mant = raw & 0x7u;
+    if (exp == 0xF && mant == 0x7) return __builtin_nanf("");
     float val;
     if (exp == 0) {
-        val = static_cast<float>(mant) * (1.0f / 1024.0f);   // 2^-7 * mant/8
+        val = static_cast<float>(mant) * (1.0f / 512.0f);   // 2^-6 * mant/8 = mant * 2^-9
     } else {
-        val = (1.0f + static_cast<float>(mant) * 0.125f) * exp2f(static_cast<float>(exp - 8));
+        val = (1.0f + static_cast<float>(mant) * 0.125f) * exp2f(static_cast<float>(exp - 7));
     }
     return sign ? -val : val;
 }
@@ -52,8 +52,8 @@ __global__ void fp8_gemm_stock_kernel(
     const unsigned char* a_row = a + m * K;
     const unsigned char* b_row = b + n * K;
     for (int k = 0; k < K; ++k) {
-        float av = fp8_e4m3_fnuz_to_float(a_row[k]);
-        float bv = fp8_e4m3_fnuz_to_float(b_row[k]);
+        float av = fp8_e4m3fn_to_float(a_row[k]);
+        float bv = fp8_e4m3fn_to_float(b_row[k]);
         acc += av * bv;
     }
     acc *= scale_a[m] * scale_b[n];
