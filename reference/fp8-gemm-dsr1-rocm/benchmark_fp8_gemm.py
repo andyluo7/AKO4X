@@ -8,8 +8,14 @@ aiter_tuned (probed), hip_stock, and any variants/<name>/{kernel.hip,binding.cpp
 
 Writes baseline.json in the AKO4X reference/<family>/ schema.
 """
-import argparse, json, time
+import argparse, json, os, time
 from pathlib import Path
+
+# Disable hipBLASLt for the fp32 reference matmul — torch 2.12+rocm7.1 hits
+# HIPBLAS_STATUS_INVALID_VALUE on small fp32 shapes like (64, 128, 2048).
+# Must be set BEFORE torch import.
+os.environ.setdefault("TORCH_BLAS_PREFER_HIPBLASLT", "0")
+os.environ.setdefault("DISABLE_ADDMM_HIP_LT", "1")
 import torch
 
 from baselines.torch_naive import fp8_gemm_naive
