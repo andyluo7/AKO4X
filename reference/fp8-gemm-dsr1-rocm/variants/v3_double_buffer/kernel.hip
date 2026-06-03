@@ -3,6 +3,22 @@
 // iteration's global loads overlap with the current iteration's MFMA work.
 // Halves the effective sync cost.
 //
+// === DEAD-END: did not beat v2 ===
+// v3 measured 273µs vs v2's 265µs — no measurable speedup. Two reasons:
+// (1) On regular global loads, the compiler/scheduler already issues loads
+//     ahead of MFMA work; explicit double-buffer doesn't add overlap that
+//     wasn't already there.
+// (2) We're compute-bound at this tile shape (9% of peak MFMA throughput),
+//     not load-latency-bound. Halving sync cost matters less than getting
+//     more compute per dispatch.
+// LDS footprint also doubled to 32KB (was 16KB), which can hurt occupancy
+// on CUs with multiple blocks.
+//
+// To actually overlap loads with compute, would need:
+//   * __builtin_amdgcn_global_load_lds — DRAM→LDS direct, no VGPR staging.
+//   * Manual s_waitcnt control.
+// Pursued instead in v4+ via bigger MFMA (32x32x16) and other levers.
+//
 // === Delta from v2_wider_tile ===
 // 1) A_lds and B_lds are [2][...] — two LDS buffers, alternated each K iter.
 // 2) Prologue: load buffer 0, sync.
