@@ -181,7 +181,8 @@ def main():
                "shape": {"M": args.m, "N": args.n, "K": args.k},
                "environment": {"torch_version": torch.__version__, "hip_version": torch.version.hip,
                                "device_name": torch.cuda.get_device_name(0),
-                               "input_dtype": "float8_e4m3fnuz", "output_dtype": "bfloat16",
+                               "input_dtype": str(FP8_DTYPE).replace("torch.", ""),
+                               "output_dtype": "bfloat16",
                                "scale_scheme": "per-token-A + per-channel-B"},
                "benchmark_config": {"warmup": args.warmup, "iters": args.iters},
                "rows": []}

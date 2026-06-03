@@ -1,0 +1,37 @@
+{
+  "operator": "fp8_gemm_dsr1",
+  "shape": {
+    "M": 4096,
+    "N": 7168,
+    "K": 2048
+  },
+  "environment": {
+    "torch_version": "2.9.0.dev20250821+rocm7.0.0.git125803b7",
+    "hip_version": "7.0.51831-a3e329ad8",
+    "device_name": "AMD Instinct MI350X VF",
+    "input_dtype": "float8_e4m3fnuz",
+    "output_dtype": "bfloat16",
+    "scale_scheme": "per-token-A + per-channel-B"
+  },
+  "benchmark_config": {
+    "warmup": 5,
+    "iters": 200
+  },
+  "rows": [
+    {
+      "M": 4096,
+      "N": 7168,
+      "K": 2048,
+      "latency_us": {
+        "hipblaslt_scaled_mm": 77.66342001559678,
+        "aiter_a8w8": 87.05564501724439,
+        "hip_stock": 114700.22926001548
+      },
+      "tflops": {
+        "hipblaslt_scaled_mm": 1548.464956395803,
+        "aiter_a8w8": 1381.4047815529773,
+        "hip_stock": 1.0484642015438617
+      }
+    }
+  ]
+}
