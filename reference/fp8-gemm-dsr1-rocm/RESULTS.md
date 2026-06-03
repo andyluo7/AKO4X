@@ -18,7 +18,7 @@
 hipBLASLt (`torch._scaled_mm`) crashes on the small correctness-check shape with `HIPBLAS_STATUS_INVALID_VALUE`
 on torch 2.12+rocm7.1 — excluded.
 
-## Variants (7 attempts, 2 wins, 4 dead-ends)
+## Variants (8 attempts, 2 wins, 4 dead-ends, 1 failed)
 
 Latest run on MI355X, all variants ran for 100 iters after 5 warmup:
 
@@ -33,6 +33,7 @@ Latest run on MI355X, all variants ran for 100 iters after 5 warmup:
 | **v7_8wave** (v6 + 8 waves/block, 24 waves/CU)          | **102.3 µs** | **1175** | **4.20×** | ✅ **THE ANCHOR** |
 | v8_wider_n (BN=256, 25% less DRAM, 16 waves/CU)         | 109.8 µs | 1095  | 3.91× | ❌ slower (MFMA latency exposed at 16 waves/CU) |
 | v9_256n_16w (BN=256, 16 waves/block, 32 waves/CU)       | 113.5 µs | 1060  | 3.79× | ❌ slower (2 blocks/CU → 128 concurrent blocks vs v7's 192) |
+| v10_global_lds (v7 + global_load_lds tile loads)        | FAILED   | —     | —     | ❌ correctness failure — global_load_lds incompatible with padded tile layout |
 
 **Headline:** v7 → 1.35× over v6, 4.2× over v1; **still 1.40× behind AITER bpreshuffle** (101.6 µs vs 72.4 µs).
 
@@ -53,6 +54,11 @@ Latest run on MI355X, all variants ran for 100 iters after 5 warmup:
 - **v9 (BN=256, 16 waves/block → 32 waves/CU):** wave count no longer the limit; root cause
   is structural — 2 blocks/CU means only 128 concurrent blocks at 64 CUs vs v7's 192, less
   wavefront-level ILP across the chip. BN=256 is ruled out regardless of wave count.
+- **v10 (global_load_lds):** FAILED correctness. `global_load_lds_dword` uses M0 (scalar)
+  as LDS base and writes to `M0 + lane_id*4` — requires a contiguous LDS layout with no
+  per-row padding. Our padded tile (ROW_STRIDE=72 bytes, LDS_PAD=8) puts row boundaries at
+  non-multiple-of-64 offsets, mismatching the hardware's contiguous lane stride. Removing
+  padding to fix this would restore the 8-way bank conflicts eliminated in v6.
 
 ### Win: v7 — more waves per block
 
