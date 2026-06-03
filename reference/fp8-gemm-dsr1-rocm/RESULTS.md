@@ -11,18 +11,21 @@
 
 | backend | latency (µs) | TFLOP/s | % MI350X FP8 peak (~5 PF) | correctness |
 |---|---:|---:|---:|---|
-| **`hipblaslt_scaled_mm`** (torch._scaled_mm)     | **77.7** | **1548** | **31%** | ✅ atol 0.5 |
-| `aiter_a8w8` (CK FP8 path)                       | 87.1     | 1381     | 28%      | ✅ atol 0.5 |
-| `aiter_a8w8_bpreshuffle` (needs preshuffled W)   | —        | —        | —        | ❌ wrong (W not shuffled) |
+| **`aiter_a8w8_bpreshuffle`** (W preshuffled once) | **79.0** | **1522** | **30%** | ✅ atol 0.25 |
+| `hipblaslt_scaled_mm` (torch._scaled_mm)         | 79.8     | 1508     | 30%      | ✅ atol 0.25 |
+| `aiter_a8w8` (CK FP8 path, generic)              | 89.3     | 1347     | 27%      | ✅ atol 0.25 |
 | `hip_stock` (scalar one-output-per-thread)       | 114700   | 1.0      | 0.02%    | ✅ atol 0.0 (exact match) |
+
+Weight pre-shuffle (`aiter.ops.shuffle.shuffle_weight`) is a one-shot tile permutation that
+matches `gemm_a8w8_bpreshuffle`'s expected layout — done once at load time in real inference,
+so it's outside the timed loop here.
 
 ## What the baselines tell us
 
-**hipBLASLt is the bar to beat: 77.7 µs / 1548 TFLOP/s.** It beats AITER's generic path
-by 12% on this shape. AITER's `gemm_a8w8_bpreshuffle` (the dedicated FP8 fast-path on
-MI350) requires the weight tensor to be pre-shuffled into a specific tile layout; calling
-it with a row-major weight produces wrong results. With proper preshuffle, it would
-likely beat both.
+**The bar to beat is now ~79 µs / 1522 TFLOP/s** (AITER bpreshuffle, tied with hipBLASLt).
+With weights pre-shuffled into the bpreshuffle tile layout, AITER edges out hipBLASLt
+by ~1% — essentially a tie. AITER's generic `gemm_a8w8` (row-major weight, no preshuffle)
+is 12% slower.
 
 **31% of FP8 peak is not the ceiling.** K=2048 is relatively small — the operator
 has less arithmetic intensity than a square 4096³ GEMM, so the *practical* peak (given
@@ -50,15 +53,11 @@ reference/fp8-gemm-dsr1-rocm/
 
 ## What's next — v1 directions
 
-Three plausible v1 attempts, in increasing effort:
-
-1. **`v1_bpreshuffle`** — shuffle the weight tensor once with AITER's helper, then call
-   `gemm_a8w8_bpreshuffle`. Tests whether AITER's fast FP8 path beats hipBLASLt with
-   the right input layout. Low effort (1-2 hours), tests an AITER tuning trick rather
-   than a custom kernel.
-2. **`v1_mfma_tile`** — handwritten HIP kernel using `mfma_f32_16x16x32_fp8_fp8`,
-   BLOCK_M=128 × BLOCK_N=128 × BLOCK_K=64, LDS double-buffered, scales fused into
-   the epilogue. Real custom-kernel work; multi-day to get right.
-3. **`v1_tilelang`** — write the same MFMA tile in TileLang DSL and let the autotuner
-   sweep tile/pipeline params. Lower hand-tuning burden, depends on TileLang's gfx950
-   support being solid.
+- ✅ **bpreshuffle delivered** — landed as a baseline (vendor tuning trick, not a custom
+  kernel). Sets the new bar at ~79 µs / 1522 TFLOP/s.
+- 🚧 **`v1_mfma_tile`** in progress — handwritten HIP kernel using `mfma_f32_16x16x32_fp8_fp8`.
+  First commit: correctness-first scaffold (64×64 block, 4 waves, single-buffered LDS,
+  scales in epilogue). Expected to be slow until iterated; the goal of v1 is correctness,
+  v2+ adds double-buffering / global_load_lds / wider tiles.
+- ⏭️ **`v2_tilelang`** (deferred) — same MFMA tile written in TileLang DSL with autotuner
+  sweep. Depends on TileLang's gfx950 support being solid.

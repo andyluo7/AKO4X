@@ -9,7 +9,7 @@
     "torch_version": "2.9.0.dev20250821+rocm7.0.0.git125803b7",
     "hip_version": "7.0.51831-a3e329ad8",
     "device_name": "AMD Instinct MI350X VF",
-    "input_dtype": "float8_e4m3fnuz",
+    "input_dtype": "float8_e4m3fn",
     "output_dtype": "bfloat16",
     "scale_scheme": "per-token-A + per-channel-B"
   },
@@ -23,14 +23,16 @@
       "N": 7168,
       "K": 2048,
       "latency_us": {
-        "hipblaslt_scaled_mm": 77.66342001559678,
-        "aiter_a8w8": 87.05564501724439,
-        "hip_stock": 114700.22926001548
+        "hipblaslt_scaled_mm": 79.75715001521166,
+        "aiter_a8w8": 89.27714501623996,
+        "aiter_a8w8_bpreshuffle": 78.99326497863512,
+        "hip_stock": 114707.74560501013
       },
       "tflops": {
-        "hipblaslt_scaled_mm": 1548.464956395803,
-        "aiter_a8w8": 1381.4047815529773,
-        "hip_stock": 1.0484642015438617
+        "hipblaslt_scaled_mm": 1507.815716397384,
+        "aiter_a8w8": 1347.0310264303846,
+        "aiter_a8w8_bpreshuffle": 1522.3966792678568,
+        "hip_stock": 1.0483954998305487
       }
     }
   ]
