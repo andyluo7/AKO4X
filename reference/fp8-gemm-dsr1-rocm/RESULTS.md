@@ -29,9 +29,10 @@ Latest run on MI355X, all variants ran for 100 iters after 5 warmup:
 | v3_double_buffer (v2 + 2-stage LDS pipeline)            | 252.4 µs | 476   | 1.70× | ❌ tied v2 (compiler already overlaps) |
 | v4_bigger_mfma (v2 + mfma_32x32x16)                     | 243.1 µs | 495   | 1.77× | ❌ tied v2 (dispatch ≠ bottleneck) |
 | v5_block_256x128 (256×128 block, 8 waves)               | 280.3 µs | 429   | 1.54× | ❌ slower (occupancy collapsed) |
-| **v6_lds_swizzle** (v2 + 8-byte LDS row pad)            | **137.7 µs** | **873** | **3.12×** | ✅ **THE ANCHOR** |
+| v6_lds_swizzle (v2 + 8-byte LDS row pad)                | 138.5 µs | 868   | 3.10× | ✅ was anchor (beat by v7) |
+| **v7_8wave** (v6 + 8 waves/block, 24 waves/CU)          | **102.3 µs** | **1175** | **4.20×** | ✅ **THE ANCHOR** |
 
-**Headline:** v6 → 1.76× over v2, 3.12× over v1; **still 1.86× behind AITER bpreshuffle** (137.7 µs vs 74.1 µs).
+**Headline:** v7 → 1.35× over v6, 4.2× over v1; **still 1.37× behind AITER bpreshuffle** (102.3 µs vs 74.7 µs).
 
 ## What the results taught us
 
@@ -45,6 +46,18 @@ Latest run on MI355X, all variants ran for 100 iters after 5 warmup:
 - **v5 (256×128):** reduced redundant DRAM traffic ~25%, got *slower*. The 24KB LDS
   footprint forced 1 block/CU (was 2), and total block count dropped (896 vs 1792)
   — the wavefront scheduler had less to interleave.
+
+### Win: v7 — more waves per block
+
+**v7's 1.35× win over v6** confirms MFMA latency exposure at 12 waves/CU.
+Doubling to 8 waves/block gives 24 waves/CU; with MFMA latency ≈ 64 cycles and
+4-cycle issue rate, 24×4=96 cycles between re-issues on the same wave — enough to
+fully hide the 64-cycle latency. The occupancy-per-block impact is zero (LDS unchanged
+at 18KB → 3 blocks/CU); the gain is purely from better MFMA pipeline utilization.
+
+**Remaining ~1.37× gap to AITER bpreshuffle** may be DRAM-bandwidth limited:
+v7 reads 917MB at ~9 TB/s ≈ 102µs which matches our measurement. AITER at 74.7µs
+reads significantly less (better L2 reuse or larger tiles).
 
 ### Win: v6 — bank conflict elimination
 
