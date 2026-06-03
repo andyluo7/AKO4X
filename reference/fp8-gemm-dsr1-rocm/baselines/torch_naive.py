@@ -20,6 +20,9 @@ import torch
 def fp8_gemm_naive(a, b, scale_a, scale_b):
     a_f = a.to(torch.float32)
     b_f = b.to(torch.float32)
-    acc = a_f @ b_f.t()                            # [M, N] in fp32
+    # einsum (NOT @ b.t()) — hipBLASLt on torch 2.12+rocm7.1 hits
+    # HIPBLAS_STATUS_INVALID_VALUE on small fp32 shapes like (64, 128, 2048).
+    # einsum routes through a different kernel path that handles all shapes.
+    acc = torch.einsum("mk,nk->mn", a_f, b_f)
     acc = acc * scale_a.view(-1, 1) * scale_b.view(1, -1)
     return acc.to(torch.bfloat16)
